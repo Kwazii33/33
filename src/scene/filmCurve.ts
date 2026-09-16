@@ -40,6 +40,7 @@ export const filmControl = {
   total: 0, // 胶片总长
   rewinding: false,
   rewindRequested: false,
+  rewindU: 0, // 倒卷纹理滚动（0..~1），画格向卷轴流动
   mode: 'idle' as FilmMode,
 };
 
@@ -100,6 +101,10 @@ export class FilmStripPath {
   private trail: THREE.Vector3[] = [];
   /** 倒卷播放游标（trail 反向走过的长度） */
   private rewindWalked = 0;
+  /** 倒卷起始时的整条冻结形状快照（刚性原路滑回用） */
+  private revSnap: THREE.Vector3[] = [];
+  /** 倒卷起始 out（滑回位移 = revFrom - out） */
+  private revFrom = 0;
   /** 锁定时的片头位置（locked 态冻结） */
   private lockedTip = new THREE.Vector3();
   /** 冻结态 PBD 强度斜坡（0..1，锁定后 0.6s 内逐步生效，避免硬跳） */
@@ -241,6 +246,11 @@ export class FilmStripPath {
       filmControl.rewindRequested = false;
       filmControl.mode = 'rewinding';
       this.rewindWalked = 0;
+      // 快照锁定形状：倒卷 = 整条胶片沿自身原路径刚性滑回（逐样本精确反演，无弹簧跳变）
+      const kSnap = Math.max(0, Math.min(this.sampleCount - 1, Math.floor(this.out / this.ds)));
+      this.revSnap = [];
+      for (let i = 0; i <= kSnap; i++) this.revSnap.push(this.pos[i].clone());
+      this.revFrom = this.out;
       // 轨迹兜底：若几乎没有轨迹（刚激活就收回），从当前片头补一段
       if (this.trail.length < 2) {
         this.trail.length = 0;
@@ -308,6 +318,8 @@ export class FilmStripPath {
     this.lastZ = this.cur.z;
     filmControl.outLength = this.out;
     filmControl.rewinding = rewinding;
+    // 倒卷纹理偏移：画格向卷轴流动的滚动量（FilmStrip 写入贴图 offset）
+    filmControl.rewindU = rewinding && this.revFrom > 0 ? Math.max(0, this.revFrom - this.out) / this.maxOut : 0;
 
     // 活动 tip：浮点索引（tipFloat = out / ds）
     const tipFloat = this.out / this.ds;
@@ -370,9 +382,11 @@ export class FilmStripPath {
     }
     this.lastK = k;
 
-    const steps = Math.max(1, Math.min(16, Math.ceil(dt / SUBSTEP)));
-    const h = dt / steps;
-    for (let s = 0; s < steps; s++) this.step(k, h, frontBlend);
+    if (!rewinding) {
+      const steps = Math.max(1, Math.min(16, Math.ceil(dt / SUBSTEP)));
+      const h = dt / steps;
+      for (let s = 0; s < steps; s++) this.step(k, h, frontBlend);
+    }
 
     // drawing（未拉满）：软物理约束——曲率钳制（限最小转弯半径）+ 软等长（不可拉伸）。
     // 与冻结 PBD 互斥（拉满/锁定走 frozenNow 分支）。
@@ -391,6 +405,15 @@ export class FilmStripPath {
       this.pbdRelax(k, this.freezeBlend);
     } else {
       this.freezeBlend = 0;
+    }
+
+    // 倒卷：整条胶片保持锁定形状不动（零振荡），回收感由两端表达——
+    // 片尾位置随 out 沿原路径平滑后退（FilmStrip  fractional tip 插值），
+    // 画格向卷轴流动由纹理偏移表达（FilmStrip 消费 filmControl.rewindU）。
+    if (rewinding && filmControl.mode === 'rewinding') {
+      const mS = this.revSnap.length;
+      for (let i = 0; i < mS; i++) this.pos[i].copy(this.revSnap[i]);
+      for (let i = 0; i < n; i++) this.vel[i].set(0, 0, 0);
     }
 
     // 硬可达域：不可拉伸胶片锚在卷轴口——任意样本距锚点不可能超过其弧长上限。
