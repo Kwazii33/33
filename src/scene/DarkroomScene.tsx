@@ -1,6 +1,6 @@
 import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
-import { useFrame, useThree } from '@react-three/fiber';
+import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Sparkles } from '@react-three/drei';
 import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing';
 import { FilmStripPath, CARD_PITCH, filmControl } from './filmCurve';
@@ -56,9 +56,11 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   const filmEntries = useMemo(() => archive.slice(0, FILM_N), []);
   const labelTex = useMemo(() => makeRollLabel(), []);
   const rollRef = useRef<THREE.Group>(null);
-  const leaderRef = useRef<THREE.Mesh>(null);
   const controlsRef = useRef<any>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 拖放手势：按下胶卷头开始拉，拖出距离后释放 = 定型
+  const grabRef = useRef<{ x: number; y: number; on: boolean }>({ x: 0, y: 0, on: false });
+  const lastLockAt = useRef(0);
 
   // 光标世界坐标 / 活跃度（engage：0=胶片归位，1=满牵引）
   const cursorWorld = useRef(new THREE.Vector3(999, 0, 999));
@@ -95,10 +97,6 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
     if (rollRef.current) {
       _qSpin.setFromAxisAngle(_YUP, -(filmControl.outLength / ROLL_RADIUS));
       rollRef.current.quaternion.copy(qAlign).multiply(_qSpin);
-    }
-    // 片头：收纳/刚开始拉时可见，拉出后由连续胶片接替
-    if (leaderRef.current) {
-      leaderRef.current.visible = filmControl.outLength < 0.5;
     }
 
     // —— 光标 → 工作台面的世界坐标（限幅在台面范围内） ——
@@ -139,10 +137,20 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
 
   const rollPos = useMemo(() => path.pos[0] ?? new THREE.Vector3(), [path]);
 
-  // 点击胶卷头：idle→drawing / locked→drawing（继续拉）
-  const handleHeadClick = (e: { stopPropagation: () => void }) => {
+  // 按下胶卷头：idle→drawing / locked→drawing（继续拉）
+  const handleHeadDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
     path.startDrawing();
+    grabRef.current = { x: e.clientX, y: e.clientY, on: true };
+  };
+  // 释放：拖出距离 → 定型（drawing→locked）；原地松开 → 保持 drawing（点击语义）
+  const handleHeadUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!grabRef.current.on) return;
+    grabRef.current.on = false;
+    const moved = Math.hypot(e.clientX - grabRef.current.x, e.clientY - grabRef.current.y);
+    if (moved >= 8 && filmControl.mode === 'drawing') {
+      if (path.lock()) lastLockAt.current = performance.now();
+    }
   };
   const handleHeadOver = () => {
     document.body.style.cursor = 'pointer';
@@ -152,7 +160,13 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   };
   // 点击台面：drawing→locked（确认位置）
   const handleTableClick = () => {
-    path.lock();
+    if (path.lock()) lastLockAt.current = performance.now();
+  };
+  // 点击胶卷头：开始/继续拉片（拖放释放刚定型过的 200ms 内不触发，避免同一次手势反复）
+  const handleHeadClick = (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    if (performance.now() - lastLockAt.current < 200) return;
+    path.startDrawing();
   };
 
   const hoveredIdx = hovered ? filmEntries.findIndex((e) => e.id === hovered) : -1;
@@ -181,7 +195,14 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       {/* 注：安全灯只保留光源，不渲染灯泡实体 */}
 
       {/* ———— 暗房工作台面 ———— */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow onClick={handleTableClick}>
+      <mesh
+        rotation={[-Math.PI / 2, 0, 0]}
+        position={[0, -0.02, 0]}
+        receiveShadow
+        onClick={handleTableClick}
+        onPointerUp={handleHeadUp}
+        onPointerDown={() => { grabRef.current.on = false; }}
+      >
         <circleGeometry args={[90, 64]} />
         <meshStandardMaterial color="#110d0a" roughness={0.92} metalness={0.08} />
       </mesh>
@@ -189,6 +210,8 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       {/* ———— 胶卷卷轴（侧立：轴水平，立于台面，胶片从底部切向吐出） ———— */}
       <group
         position={[rollPos.x, ROLL_RADIUS, rollPos.z]}
+        onPointerDown={handleHeadDown}
+        onPointerUp={handleHeadUp}
         onClick={handleHeadClick}
         onPointerOver={handleHeadOver}
         onPointerOut={handleHeadOut}
@@ -227,19 +250,7 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
           </mesh>
         </group>
       </group>
-      {/* 吐出的片头：贴台，指向带身起点方向（点击它开始拉片） */}
-      <mesh
-        ref={leaderRef}
-        position={[rollPos.x + tan0.x * (ROLL_RADIUS + 0.75), 0.05, rollPos.z + tan0.z * (ROLL_RADIUS + 0.75)]}
-        rotation={[-Math.PI / 2, Math.atan2(tan0.x, tan0.z), 0]}
-        rotation-order="YXZ"
-        onClick={handleHeadClick}
-        onPointerOver={handleHeadOver}
-        onPointerOut={handleHeadOut}
-      >
-        <planeGeometry args={[1.6, 0.62]} />
-        <meshStandardMaterial color="#14100c" roughness={0.6} side={THREE.DoubleSide} />
-      </mesh>
+      {/* 吐出的片头已移除：胶片直接从卷轴口连续抽出（见红圈反馈） */}
 
       {/* ———— 连续胶片（唯一主体：胶片边缘/宽度/连续表面/齿孔 + 画格一体成型） ———— */}
       <FilmStrip

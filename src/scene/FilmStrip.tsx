@@ -100,14 +100,14 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
     const x = atlas.cvs.getContext('2d')!;
     const W = atlas.cvs.width;
     const u = atlas.pxPerU;
-    // 胶片基底 + 边缘
-    x.fillStyle = '#0b0806';
+    // 胶片基底 + 边缘（微亮于台面，暗房中可辨认为「胶片」而非黑洞）
+    x.fillStyle = '#181009';
     x.fillRect(0, 0, W, TEX_H);
-    x.fillStyle = '#161009';
+    x.fillStyle = '#2a1c10';
     x.fillRect(0, 0, W, 10);
     x.fillRect(0, TEX_H - 10, W, 10);
     // 齿孔（沿整条胶片等距，圆角方孔）
-    x.fillStyle = '#241408';
+    x.fillStyle = '#4a2e16';
     const holeW = 46, holeH = 28;
     for (let hx = 14; hx + holeW < W; hx += 0.62 * u) {
       for (const hy of [16, TEX_H - 44]) {
@@ -150,7 +150,7 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
         x.strokeRect(wx0 + 3, wy0 + 3, wx1 - wx0 - 6, wy1 - wy0 - 6);
       }
       // 画窗压板亮线
-      x.fillStyle = 'rgba(30,20,12,0.9)';
+      x.fillStyle = 'rgba(64,42,24,0.95)';
       x.fillRect(wx0 - 4, wy0 - 4, wx1 - wx0 + 8, 3);
       x.fillRect(wx0 - 4, wy1 + 1, wx1 - wx0 + 8, 3);
     }
@@ -200,7 +200,13 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
     }
     for (let i = 0; i <= k; i++) {
       const p = path.pos[i];
-      path.tangentAt(i, _t);
+      // 侧向只用已激活段（0..k）估切线——tangentAt 会读到 pos[k+1]（未激活的收纳位），
+      // 把末端四边形拉成多余三角形
+      const a = path.pos[Math.max(0, i - 1)];
+      const b = path.pos[Math.min(k, i + 1)];
+      _t.set(b.x - a.x, 0, b.z - a.z);
+      if (_t.lengthSq() < 1e-10) _t.set(path.tan0.x, 0, path.tan0.z);
+      _t.normalize();
       const px = -_t.z;
       const pz = _t.x;
       const hw = STRIP_W / 2;

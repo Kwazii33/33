@@ -26,9 +26,7 @@ const SUBSTEP = 1 / 240;
 const ANCHOR_SAMPLES = 3; // 出口锚定段数（固定在卷轴切向出口线上）
 const ANCHOR_BLEND_END = ANCHOR_SAMPLES + 6; // 冻结态「朝卷轴侧」约束的覆盖末端
 const TRAIL_MIN_DIST = 0.07; // 轨迹记录最小间距
-const REWIND_V0 = 15; // 倒卷初速（单位/秒）
-const REWIND_VMIN = 2.2; // 倒卷末速保底（丝滑收尾）
-const REWIND_DECAY = 1.7; // 倒卷减速系数（指数衰减 = 先快后慢）
+const REWIND_SPEED = 7; // 倒卷速度（恒定，单位/秒）——不加速不减速，丝滑匀速回收
 
 export type FilmMode = 'idle' | 'drawing' | 'locked' | 'rewinding';
 
@@ -91,7 +89,6 @@ export class FilmStripPath {
   private trail: THREE.Vector3[] = [];
   /** 倒卷播放游标（trail 反向走过的长度） */
   private rewindWalked = 0;
-  private rewindSpeed = REWIND_V0;
   /** 锁定时的片头位置（locked 态冻结） */
   private lockedTip = new THREE.Vector3();
   /** 冻结态 PBD 强度斜坡（0..1，锁定后 0.6s 内逐步生效，避免硬跳） */
@@ -234,7 +231,6 @@ export class FilmStripPath {
       filmControl.rewindRequested = false;
       filmControl.mode = 'rewinding';
       this.rewindWalked = 0;
-      this.rewindSpeed = REWIND_V0;
       // 轨迹兜底：若几乎没有轨迹（刚激活就收回），从当前片头补一段
       if (this.trail.length < 2) {
         this.trail.length = 0;
@@ -252,9 +248,8 @@ export class FilmStripPath {
     }
 
     if (rewinding) {
-      // —— 倒卷：沿 trail 反向播放（先快后慢的指数减速，保留惯性） ——
-      this.rewindSpeed = Math.max(REWIND_VMIN, this.rewindSpeed * Math.exp(-REWIND_DECAY * dt));
-      this.rewindWalked += this.rewindSpeed * dt;
+      // —— 倒卷：沿 trail 反向匀速播放（恒定速度，无加速无减速，无重新计算） ——
+      this.rewindWalked += REWIND_SPEED * dt;
       const total = this.trailLength();
       const remain = Math.max(0, total - this.rewindWalked);
       this.out = Math.min(this.out, remain);
