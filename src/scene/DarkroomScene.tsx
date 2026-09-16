@@ -5,6 +5,7 @@ import { OrbitControls, Sparkles } from '@react-three/drei';
 import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing';
 import { FilmStripPath, CARD_PITCH, START_ARC, cardQuaternion, bankAngle, filmControl } from './filmCurve';
 import { FilmCard } from './FilmCard';
+import { FilmStripMesh } from './FilmStripMesh';
 import { archive } from '@/data/archive';
 import { matchesFilter, type ArchiveFilter } from '@/data/taxonomy';
 import { CARD_COUNT } from '@/lib/progress';
@@ -46,6 +47,9 @@ function makeRollLabel(): THREE.CanvasTexture {
 
 export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, onCardReady }: DarkroomSceneProps) {
   const path = useMemo(() => new FilmStripPath(CARD_COUNT, CARD_PITCH), []);
+  const wDbg = window as unknown as { __filmPath?: FilmStripPath; __filmControl?: typeof filmControl };
+  wDbg.__filmPath = path;
+  wDbg.__filmControl = filmControl;
   const labelTex = useMemo(() => makeRollLabel(), []);
   const rollRef = useRef<THREE.Group>(null);
   const controlsRef = useRef<any>(null);
@@ -83,6 +87,10 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
 
   useFrame(({ clock, camera, pointer }, delta) => {
     const dt = Math.min(delta, 0.05);
+    const w = window as unknown as { __sceneTick?: number; __pointer?: number[]; __film?: unknown };
+    w.__sceneTick = (w.__sceneTick ?? 0) + 1;
+    w.__pointer = [pointer.x, pointer.y];
+    w.__film = { out: filmControl.outLength, engage: engage.current, cw: [cursorWorld.current.x.toFixed(2), cursorWorld.current.z.toFixed(2)] };
     // 卷轴绕自身横轴旋转 = 已拉出片长 / 半径（鼠标拉出 ↔ 退卷，收卷 ↔ 卷回）
     if (rollRef.current) {
       _qSpin.setFromAxisAngle(_YUP, -(filmControl.outLength / ROLL_RADIUS));
@@ -212,6 +220,9 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
         <planeGeometry args={[1.6, 0.62]} />
         <meshStandardMaterial color="#14100c" roughness={0.6} side={THREE.DoubleSide} />
       </mesh>
+
+      {/* ———— 连续胶片条带（铺在卡片下方的实体胶片，从卷轴连到尾端） ———— */}
+      <FilmStripMesh path={path} />
 
       {/* ———— 底片帧链（胶卷带） ———— */}
       {archive.map((entry, i) => (

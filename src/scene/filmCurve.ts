@@ -51,10 +51,18 @@ const _dir = new THREE.Vector3();
 const _tip = new THREE.Vector3();
 const _bt2 = new THREE.Vector3();
 
+/** 确定性伪随机（同一 i 每次加载结果一致，避免卷轴出口方向随机漂移） */
+function hash01(i: number, salt: number): number {
+  const s = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+
 export class FilmStripPath {
   readonly ds: number;
   readonly total: number;
   readonly sampleCount: number;
+  /** 胶片终点（可拉出的最大弧长 = 最后一帧末端） */
+  readonly maxOut: number;
   /** 卷轴出口方向（胶片吐出方向，兜底方向用） */
   readonly tan0: THREE.Vector3;
 
@@ -86,7 +94,7 @@ export class FilmStripPath {
       const x0 = dir > 0 ? 0 : X_MAX;
       for (let s = 1; s <= segs; s++) {
         const x = x0 + dir * (X_MAX / segs) * s;
-        const wob = Math.sin(s * 1.6 + z * 0.55) * 0.5 + (Math.random() - 0.5) * 0.8;
+        const wob = Math.sin(s * 1.6 + z * 0.55) * 0.5 + (hash01(s * 7 + z * 13, 1) - 0.5) * 0.8;
         pts.push(new THREE.Vector3(x, 0, z + wob));
       }
       const r = ROW_GAP / 2;
@@ -112,7 +120,7 @@ export class FilmStripPath {
       const u = Math.min(1, (i * this.ds) / totalLen);
       const p = curve.getPointAt(u);
       this.base.push(p);
-      this.phase.push(Math.random() * Math.PI * 2);
+      this.phase.push(hash01(i, 2) * Math.PI * 2);
       this.pos.push(p.clone());
       this.vel.push(new THREE.Vector3());
       this.snap.push(p.clone());
@@ -127,7 +135,9 @@ export class FilmStripPath {
     }
     this.total = totalLen;
     this.sampleCount = m;
-    filmControl.total = totalLen;
+    // 胶片终点 = 最后一帧末端（+半帧余量）：拉到头即终点，不再无限生成
+    this.maxOut = START_ARC + cardCount * pitch + 0.4;
+    filmControl.total = this.maxOut;
 
     // 出口方向
     const a = this.base[0];
@@ -189,7 +199,7 @@ export class FilmStripPath {
       // 拉出：按「胶片末端实际走过的路径」喂片（不是光标路径——光标会抄近道）
       const travel = Math.hypot(this.cur.x - this.lastX, this.cur.z - this.lastZ);
       if (engage > 0.02 && travel > 1e-4) {
-        this.out = Math.min(this.total, this.out + travel);
+        this.out = Math.min(this.maxOut, this.out + travel);
       }
     }
     this.lastX = this.cur.x;
