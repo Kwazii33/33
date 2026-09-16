@@ -58,7 +58,6 @@ const _tgt = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _tip = new THREE.Vector3();
 const _bt2 = new THREE.Vector3();
-const _anchorEnd = new THREE.Vector3();
 const _pin = new THREE.Vector3();
 
 /** 确定性伪随机（同一 i 每次加载结果一致，避免卷轴出口方向随机漂移） */
@@ -476,28 +475,16 @@ export class FilmStripPath {
       p.y += v.y * dt;
       p.z += v.z * dt;
     }
-    // 出口锚定段：
-    // - 胶片已出离卷轴口：锚定段 = 从卷轴口到自由链首样本的等分直线——
-    //   转角由整段均匀承担并随牵引方向平滑摆动（胶片绕卷轴边缘吐出，无薄撑段）；
-    // - 刚冒头：固定在卷轴切向出口线上。
+    // 出口锚定段：胶片只沿卷轴单一固定切向（tan0）吐出——pos[0..a] 永久钉在射线上，
+    // 不存在从胶卷头两侧开始的形态；转向由曲率钳制在射线之后逐段渐进承担。
     const a = ANCHOR_SAMPLES;
-    if (k + 1 >= a) {
-      _anchorEnd.copy(this.pos[a]);
-      for (let i = 0; i < a; i++) {
-        const f = i / a;
-        this.pos[i].lerpVectors(this.base[0], _anchorEnd, f);
-        this.pos[i].y = 0.03;
-        this.vel[i].set(0, 0, 0);
-      }
-    } else {
-      for (let i = 0; i < a && i < n; i++) {
-        this.pos[i].set(
-          this.base[0].x + this.tan0.x * i * this.ds,
-          0.03,
-          this.base[0].z + this.tan0.z * i * this.ds,
-        );
-        this.vel[i].set(0, 0, 0);
-      }
+    for (let i = 0; i <= a && i < n; i++) {
+      this.pos[i].set(
+        this.base[0].x + this.tan0.x * i * this.ds,
+        0.03,
+        this.base[0].z + this.tan0.z * i * this.ds,
+      );
+      this.vel[i].set(0, 0, 0);
     }
   }
 
@@ -510,7 +497,7 @@ export class FilmStripPath {
     const n = this.sampleCount;
     const end = Math.min(k, n - 1);
     const MAXA = 0.5; // rad/段 ≈ 28.6°
-    for (let i = ANCHOR_SAMPLES + 1; i < end; i++) {
+    for (let i = ANCHOR_SAMPLES; i < end; i++) {
       const p0 = this.pos[i - 1];
       const p1 = this.pos[i];
       const p2 = this.pos[i + 1];
@@ -520,8 +507,9 @@ export class FilmStripPath {
       const bz = p2.z - p1.z;
       const la = Math.hypot(ax, az);
       const lb = Math.hypot(bx, bz);
-      if (la < 1e-6 || lb < 1e-6) continue;
-      const aAng = Math.atan2(az, ax);
+      // i=锚定末端：入射方向 = 卷轴固定切向 tan0（虚拟段），钳制射线后第一折
+      const aAng = i === ANCHOR_SAMPLES ? Math.atan2(this.tan0.z, this.tan0.x) : Math.atan2(az, ax);
+      if ((i > ANCHOR_SAMPLES && la < 1e-6) || lb < 1e-6) continue;
       let d = Math.atan2(bz, bx) - aAng;
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
@@ -551,7 +539,7 @@ export class FilmStripPath {
         if (len < 1e-6) continue;
         const diff = ((len - this.ds) / len) * 0.35;
         p.addScaledVector(_dir, -diff * 0.5);
-        q.addScaledVector(_dir, diff * 0.5);
+        if (i - 1 > ANCHOR_SAMPLES) q.addScaledVector(_dir, diff * 0.5); // 锚定侧钉死不动
       }
     }
   }
