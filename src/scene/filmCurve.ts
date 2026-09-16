@@ -1,23 +1,21 @@
 import * as THREE from 'three';
 
 /**
- * 胶卷带仿真：鼠标「拉出」胶卷（pointermove 驱动，无滚轮）。
+ * 胶卷带仿真：状态机 + 链式弹簧。
  *
- * 三状态：
- * 1. 收纳：全部胶片卷在卷轴里（outLength=0，无卡片可见）；
- * 2. 拉出/展开：光标移动 = 手捏胶片末端向外拉——胶片只出不进，
- *    前端（自由端）追随光标轨迹，后端经链式弹簧延迟跟随，
- *    形成连续、柔软、有惯性的胶片曲线；
- * 3. 停留展示：光标停 → 仿真阻尼耗散 → 胶片固定保持当前形态。
+ * 状态（filmControl.mode）：
+ *  - idle：      收纳。只有卷轴和片头，鼠标移动不影响胶片。
+ *  - drawing：   拉出。点击胶卷头进入；光标移动 = 手捏片头向外拉，
+ *               前端追随光标轨迹，后端链式弹簧延迟跟随，形成柔软惯性曲线。
+ *               同时把片头轨迹记录进 trail（供倒卷原路返回）。
+ *  - locked：    定型。左键点击确认；片头冻结在当前位置，鼠标不再影响胶片。
+ *  - rewinding： 倒卷。片头沿 trail 反向播放（先快后慢，保留惯性），
+ *               胶片逐段滑回卷轴，归零后回到 idle。
  *
- * 收卷（requestRewind）：沿原展开路径反向回收，尾端匀速滑回卷轴，
- * 帧依次卷入（先快后慢，保留惯性），outLength 归零后完全收纳。
- *
- * 稳定性：每段是独立阻尼弹簧，目标为「前一采样旧位置 + 定长方向」
- * （帧级快照、前馈耦合），加邻速阻尼抑制链上共振放大，
+ * 稳定性：每段独立阻尼弹簧 + 帧级快照前馈耦合 + 邻速阻尼，
  * 固定 1/240s 子步积分 + 失稳自动复位——任何帧率下不会发散。
  */
-export const CARD_PITCH = 2.42; // 帧距（卡高 2.32 + 0.1 窄缝）
+export const CARD_PITCH = 2.42; // 帧距（画格长 2.22 + 0.2 间隔）
 export const START_ARC = 1.35; // 胶片卷出口到第一帧的弧长
 const ROW_GAP = 2.6;
 const X_MAX = 8.2;
@@ -25,19 +23,27 @@ const CHAIN_K = 80;
 const DAMP = 4;
 const COUPLE_DAMP = 32; // 邻速阻尼（低于 ~32 链上共振会放大发散）
 const SUBSTEP = 1 / 240;
-const REWIND_RATE = 2.0; // 收卷衰减系数（先快后慢）
-const REWIND_MIN = 3.0; // 收卷保底速度（单位/秒）
+const ANCHOR_SAMPLES = 3; // 出口锚定段数（固定在卷轴切向出口线上）
+const ANCHOR_BLEND_END = ANCHOR_SAMPLES + 6; // 冻结态「朝卷轴侧」约束的覆盖末端
+const TRAIL_MIN_DIST = 0.07; // 轨迹记录最小间距
+const REWIND_V0 = 15; // 倒卷初速（单位/秒）
+const REWIND_VMIN = 2.2; // 倒卷末速保底（丝滑收尾）
+const REWIND_DECAY = 1.7; // 倒卷减速系数（指数衰减 = 先快后慢）
 
-/** 全局胶片控制状态（HUD 读数 / 收卷请求桥接） */
+export type FilmMode = 'idle' | 'drawing' | 'locked' | 'rewinding';
+
+/** 全局胶片控制状态（HUD 读数 / 交互桥接） */
 export const filmControl = {
   outLength: 0, // 已拉出长度（弧长）
   total: 0, // 胶片总长
   rewinding: false,
   rewindRequested: false,
+  mode: 'idle' as FilmMode,
 };
 
 /** 一键收回胶卷（HUD 倒卷按钮调用） */
 export function requestRewind() {
+  if (filmControl.mode === 'idle' || filmControl.mode === 'rewinding') return;
   filmControl.rewindRequested = true;
 }
 
@@ -50,6 +56,8 @@ const _tgt = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _tip = new THREE.Vector3();
 const _bt2 = new THREE.Vector3();
+const _anchorEnd = new THREE.Vector3();
+const _pin = new THREE.Vector3();
 
 /** 确定性伪随机（同一 i 每次加载结果一致，避免卷轴出口方向随机漂移） */
 function hash01(i: number, salt: number): number {
@@ -76,10 +84,20 @@ export class FilmStripPath {
   /** 弹簧追随后的光标（带惯性） */
   private cur = new THREE.Vector3();
   private out = 0;
-  private rewinding = false;
   private lastX = 0;
   private lastZ = 0;
   private lastK = 0;
+  /** 片头轨迹（drawing 时记录，rewinding 时反向播放） */
+  private trail: THREE.Vector3[] = [];
+  /** 倒卷播放游标（trail 反向走过的长度） */
+  private rewindWalked = 0;
+  private rewindSpeed = REWIND_V0;
+  /** 锁定时的片头位置（locked 态冻结） */
+  private lockedTip = new THREE.Vector3();
+  /** 冻结态 PBD 强度斜坡（0..1，锁定后 0.6s 内逐步生效，避免硬跳） */
+  private freezeBlend = 0;
+  /** PBD 弛豫前的原始位置存档（alpha 斜坡插值用） */
+  private _pbdOrig: THREE.Vector3[] = [];
 
   constructor(cardCount: number, pitch: number) {
     // —— 1. 蛇形参考线（仅用于等弧长采样与出口定位，不再是静止形态） ——
@@ -125,6 +143,7 @@ export class FilmStripPath {
       this.vel.push(new THREE.Vector3());
       this.snap.push(p.clone());
       this.vsnap.push(new THREE.Vector3());
+      this._pbdOrig.push(new THREE.Vector3());
     }
     // 居中
     const box = new THREE.Box3().setFromPoints(this.base);
@@ -144,11 +163,38 @@ export class FilmStripPath {
     const b = this.base[Math.min(m - 1, 4)];
     this.tan0 = b.clone().sub(a).setY(0).normalize();
 
-    // 初始：全部收纳（ parked 在卷轴出口的小线圈上，不可见）
+    // 初始：收纳（idle）
     this.lastX = 0;
     this.lastZ = 0;
     this.parkAll();
     this.cur.copy(this.base[0]);
+  }
+
+  // ———— 状态切换（由场景中的点击调用） ————
+
+  /** 点击胶卷头：idle→drawing，locked→drawing（继续拉） */
+  startDrawing(): boolean {
+    if (filmControl.mode === 'idle' || filmControl.mode === 'locked') {
+      if (filmControl.mode === 'idle' && this.out <= 0) {
+        // 从卷轴出发：片头从卷轴口开始记录
+        this.trail.length = 0;
+        this.trail.push(this.base[0].clone().setY(0.05));
+        this.cur.copy(this.base[0]);
+        this.lastX = this.cur.x;
+        this.lastZ = this.cur.z;
+      }
+      filmControl.mode = 'drawing';
+      return true;
+    }
+    return false;
+  }
+
+  /** 点击确认位置：drawing→locked（片头冻结） */
+  lock(): boolean {
+    if (filmControl.mode !== 'drawing') return false;
+    filmControl.mode = 'locked';
+    this.lockedTip.copy(this.cur).setY(0.05);
+    return true;
   }
 
   /** 全部样本 parked 到卷轴出口线圈（收纳形态） */
@@ -167,6 +213,11 @@ export class FilmStripPath {
     return Math.min(this.sampleCount - 2, Math.round((START_ARC + i * CARD_PITCH) / this.ds));
   }
 
+  /** 第 i 帧中心弧长 */
+  cardArc(i: number): number {
+    return START_ARC + i * CARD_PITCH + CARD_PITCH / 2;
+  }
+
   /**
    * 每帧仿真。
    * @param t      时钟（秒）
@@ -176,26 +227,45 @@ export class FilmStripPath {
    */
   update(t: number, cursor: THREE.Vector3, engage: number, dt: number) {
     const n = this.sampleCount;
+    const mode = filmControl.mode;
 
-    // —— 状态机：收卷请求 / 收卷中 / 拉出 ——
+    // —— 收卷请求（任意非 idle 状态可发起） ——
     if (filmControl.rewindRequested) {
       filmControl.rewindRequested = false;
-      this.rewinding = true;
+      filmControl.mode = 'rewinding';
+      this.rewindWalked = 0;
+      this.rewindSpeed = REWIND_V0;
+      // 轨迹兜底：若几乎没有轨迹（刚激活就收回），从当前片头补一段
+      if (this.trail.length < 2) {
+        this.trail.length = 0;
+        this.trail.push(this.base[0].clone().setY(0.05));
+        this.trail.push(this.cur.clone().setY(0.05));
+      }
     }
-    // 光标弹簧（惯性 + 延迟）
-    const ck = Math.min(1, dt * 9);
-    this.cur.x += (cursor.x - this.cur.x) * ck;
-    this.cur.z += (cursor.z - this.cur.z) * ck;
+    const rewinding = filmControl.mode === 'rewinding';
 
-    // 收卷：长度先快后慢衰减（保留惯性），归零即完全收纳
-    if (this.rewinding) {
-      const rate = Math.max(this.out * REWIND_RATE, REWIND_MIN);
-      this.out = Math.max(0, this.out - rate * dt);
-      if (this.out <= 0) {
-        this.rewinding = false;
+    // 光标弹簧（惯性 + 延迟）——locked/idle 时不追随
+    if (mode === 'drawing') {
+      const ck = Math.min(1, dt * 9);
+      this.cur.x += (cursor.x - this.cur.x) * ck;
+      this.cur.z += (cursor.z - this.cur.z) * ck;
+    }
+
+    if (rewinding) {
+      // —— 倒卷：沿 trail 反向播放（先快后慢的指数减速，保留惯性） ——
+      this.rewindSpeed = Math.max(REWIND_VMIN, this.rewindSpeed * Math.exp(-REWIND_DECAY * dt));
+      this.rewindWalked += this.rewindSpeed * dt;
+      const total = this.trailLength();
+      const remain = Math.max(0, total - this.rewindWalked);
+      this.out = Math.min(this.out, remain);
+      if (remain <= 0.001) {
+        // 收净：回到 idle
+        this.out = 0;
+        filmControl.mode = 'idle';
+        this.trail.length = 0;
         this.parkAll();
       }
-    } else {
+    } else if (mode === 'drawing') {
       // 拉出：按「胶片末端实际走过的路径」喂片（不是光标路径——光标会抄近道）
       const travel = Math.hypot(this.cur.x - this.lastX, this.cur.z - this.lastZ);
       if (engage > 0.02 && travel > 1e-4) {
@@ -205,7 +275,7 @@ export class FilmStripPath {
     this.lastX = this.cur.x;
     this.lastZ = this.cur.z;
     filmControl.outLength = this.out;
-    filmControl.rewinding = this.rewinding;
+    filmControl.rewinding = rewinding;
 
     // 活动 tip：浮点索引（tipFloat = out / ds）
     const tipFloat = this.out / this.ds;
@@ -218,20 +288,49 @@ export class FilmStripPath {
       this.vsnap[i].copy(this.vel[i]);
     }
 
-    // tip 目标（先算好，供“冒头”初始化使用）
+    // tip 目标
     const lift = (0.55 + 0.22 * Math.sin(t * 1.7)) * engage + 0.05;
-    if (this.rewinding || this.out <= 0) {
-      // 收卷/收纳：沿冻结曲线按 out 插值，尾端滑回原路
-      const ka = Math.min(n - 2, k);
-      _tip.copy(this.snap[ka]).lerp(this.snap[ka + 1], frac);
-    } else {
+    if (rewinding) {
+      // 沿 trail 反向插值（贴台面滑回）
+      this.trailPointAt(this.rewindWalked, _tip);
+      _tip.y = 0.05;
+    } else if (mode === 'drawing' && this.out > 0 && this.out < this.maxOut - 1e-6) {
+      // 拉出中：片头追随光标（带升沉），但不可超出弧长预算——
+      // 欧氏距离 ≤ 弧长，拉远时胶片整体绷紧（如真实胶片），拉伸不会囤积在出口锚定段
       _tip.set(this.cur.x, lift, this.cur.z);
+      const dx = _tip.x - this.base[0].x;
+      const dz = _tip.z - this.base[0].z;
+      const d = Math.hypot(dx, dz);
+      const reach = Math.max(0.5, this.out * 0.995);
+      if (d > reach) {
+        const f = reach / d;
+        _tip.x = this.base[0].x + dx * f;
+        _tip.z = this.base[0].z + dz * f;
+      }
+    } else if (this.out > 0) {
+      // 冻结（locked / 拉满 / 兜底）：片尾零阶保持——钉在上一帧片尾位置。
+      // 注意不可用外推（snap[k-1] + dir·ds）：外推沿运动方向每帧增量平移，
+      // 刚性链会被片尾拖着整体跑掉。零阶保持是不动点：tip 钉在自己上一帧位置。
+      _tip.copy(this.snap[k]);
+    } else {
+      _tip.copy(this.snap[0]);
     }
+
+    // drawing：记录片头轨迹（供倒卷原路返回）
+    if (mode === 'drawing' && this.out > 0.05) {
+      const lastT = this.trail[this.trail.length - 1];
+      if (!lastT || Math.hypot(_tip.x - lastT.x, _tip.z - lastT.z) > TRAIL_MIN_DIST) {
+        this.trail.push(new THREE.Vector3(_tip.x, 0.05, _tip.z));
+      }
+    }
+
+    // 冻结态前段「朝卷轴侧」约束实验回退：与后段约束在交界处打架，恒 false
+    const frontBlend = false;
 
     // 新激活的样本（拉出越界）：从卷轴口“冒”到链上目标位
     if (k > this.lastK) {
       for (let i = this.lastK + 1; i <= k && i < n; i++) {
-        this.ftlTarget(i, k);
+        this.ftlTarget(i, k, false);
         this.pos[i].copy(_tgt);
         this.vel[i].set(0, 0, 0);
       }
@@ -240,23 +339,76 @@ export class FilmStripPath {
 
     const steps = Math.max(1, Math.min(16, Math.ceil(dt / SUBSTEP)));
     const h = dt / steps;
-    for (let s = 0; s < steps; s++) this.step(k, h);
+    for (let s = 0; s < steps; s++) this.step(k, h, frontBlend);
 
-    // 失稳保险
+    // 冻结态（locked / 拉满兜底）：PBD 位置约束——整条链收成 ds 等长、不可拉伸。
+    // 卷轴侧优先（前向从锚定线收），片尾钉在 tip；带强度斜坡（0.6s），
+    // 避免锁定瞬间硬跳变。拉伸不再囤积在出口锚定段。
+    const frozenNow = !rewinding && this.out > 0 && (mode === 'locked' || mode === 'idle' || this.out >= this.maxOut - 1e-6);
+    if (frozenNow) {
+      this.freezeBlend = Math.min(1, this.freezeBlend + dt / 0.6);
+      this.pbdRelax(k, this.freezeBlend);
+    } else {
+      this.freezeBlend = 0;
+    }
+
+    // 失稳保险（探针覆盖 tip 本身与其后一样本——tip 跑飞时 k+1 已冻结探不到）
     const probe = this.pos[Math.min(n - 1, k + 1)];
-    if (!Number.isFinite(probe.x + probe.y + probe.z) || Math.abs(probe.x) + Math.abs(probe.z) > 500) {
+    const probeTip = this.pos[k];
+    if (!Number.isFinite(probe.x + probe.y + probe.z) || !Number.isFinite(probeTip.x + probeTip.y + probeTip.z) ||
+        Math.abs(probe.x) + Math.abs(probe.z) > 500 || Math.abs(probeTip.x) + Math.abs(probeTip.z) > 500) {
       this.out = 0;
-      this.rewinding = false;
+      filmControl.mode = 'idle';
+      this.trail.length = 0;
       this.parkAll();
       this.cur.copy(this.base[0]);
     }
   }
 
-  /** 定长跟随目标：snap[i+1] + ds·dir（dir = 当前局部方向，形状记忆） */
-  private ftlTarget(i: number, k: number) {
+  /** trail 折线总长 */
+  private trailLength(): number {
+    let L = 0;
+    for (let i = 1; i < this.trail.length; i++) {
+      L += this.trail[i].distanceTo(this.trail[i - 1]);
+    }
+    return L;
+  }
+
+  /** trail 反向：从末端往回走 dist 处的插值点（写入 out） */
+  private trailPointAt(dist: number, outV: THREE.Vector3): THREE.Vector3 {
+    const m = this.trail.length;
+    if (m === 0) return outV.copy(this.base[0]);
+    if (m === 1) return outV.copy(this.trail[0]);
+    let d = dist;
+    for (let i = m - 1; i > 0; i--) {
+      const a = this.trail[i];
+      const b = this.trail[i - 1];
+      const seg = a.distanceTo(b);
+      if (d <= seg) return outV.copy(a).lerp(b, seg > 1e-6 ? d / seg : 0);
+      d -= seg;
+    }
+    return outV.copy(this.trail[0]);
+  }
+
+  /** 定长跟随目标：snap[i+1] + ds·dir（dir = 当前局部方向，形状记忆）
+   *  frozen 时靠近卷轴的前段改用「朝卷轴侧」约束（snap[i-1] + ds·dir），
+   *  松弛从卷轴侧开始收——避免尾端先收、卷轴侧长期薄撑。 */
+  private ftlTarget(i: number, k: number, frontBlend: boolean) {
     if (i >= k) {
       // tip 本身
       _tgt.copy(_tip);
+      return;
+    }
+    if (frontBlend && i > ANCHOR_SAMPLES && i <= ANCHOR_BLEND_END) {
+      _dir.copy(this.snap[i]).sub(this.snap[i - 1]);
+      const len = _dir.length();
+      if (len < 1e-4) {
+        _dir.copy(this.tan0);
+      } else {
+        _dir.multiplyScalar(1 / len);
+      }
+      _tgt.copy(this.snap[i - 1]).addScaledVector(_dir, this.ds);
+      if (_tgt.y < 0.04) _tgt.y = 0.04 + Math.sin(this.phase[i] + i * 0.7) * 0.012;
       return;
     }
     _dir.copy(this.snap[i]).sub(this.snap[i + 1]);
@@ -271,13 +423,13 @@ export class FilmStripPath {
     if (_tgt.y < 0.04) _tgt.y = 0.04 + Math.sin(this.phase[i] + i * 0.7) * 0.012;
   }
 
-  private step(k: number, dt: number) {
+  private step(k: number, dt: number, frontBlend: boolean) {
     const n = this.sampleCount;
     // 只活动到 tip（k）；k+1.. 冻结——收卷时它们保存原曲线位置供尾端沿原路滑回
     for (let i = Math.min(n - 1, k); i >= 1; i--) {
       const p = this.pos[i];
       const v = this.vel[i];
-      this.ftlTarget(i, k);
+      this.ftlTarget(i, k, frontBlend);
       const vnx = i < n - 1 ? this.vsnap[i + 1].x : v.x;
       const vny = i < n - 1 ? this.vsnap[i + 1].y : v.y;
       const vnz = i < n - 1 ? this.vsnap[i + 1].z : v.z;
@@ -288,9 +440,88 @@ export class FilmStripPath {
       p.y += v.y * dt;
       p.z += v.z * dt;
     }
-    // 第 0 段锚定在卷轴出口
-    this.pos[0].copy(this.base[0]);
-    this.vel[0].set(0, 0, 0);
+    // 出口锚定段：
+    // - 胶片已出离卷轴口：锚定段 = 从卷轴口到自由链首样本的等分直线——
+    //   转角由整段均匀承担并随牵引方向平滑摆动（胶片绕卷轴边缘吐出，无薄撑段）；
+    // - 刚冒头：固定在卷轴切向出口线上。
+    const a = ANCHOR_SAMPLES;
+    if (k + 1 >= a) {
+      _anchorEnd.copy(this.pos[a]);
+      for (let i = 0; i < a; i++) {
+        const f = i / a;
+        this.pos[i].lerpVectors(this.base[0], _anchorEnd, f);
+        this.pos[i].y = 0.03;
+        this.vel[i].set(0, 0, 0);
+      }
+    } else {
+      for (let i = 0; i < a && i < n; i++) {
+        this.pos[i].set(
+          this.base[0].x + this.tan0.x * i * this.ds,
+          0.03,
+          this.base[0].z + this.tan0.z * i * this.ds,
+        );
+        this.vel[i].set(0, 0, 0);
+      }
+    }
+  }
+
+  /**
+   * 冻结态（locked / 拉满 / 兜底）PBD 位置约束：整条链收成 ds 等长、不可拉伸。
+   * 片尾钉在当前 tip；前向从锚定线收（卷轴侧优先），后向从片尾收；
+   * 每轮重新钉片尾；y 下限贴台 0.03；4 轮迭代。
+   * alpha = freezeBlend（0.6s 斜坡），全刚性前按原始位置 lerp，避免锁定瞬间硬跳。
+   */
+  private pbdRelax(k: number, alpha: number) {
+    const n = this.sampleCount;
+    const end = Math.min(k, n - 1);
+    if (end <= ANCHOR_SAMPLES + 1) return;
+    _pin.copy(_tip);
+    // 出口锚定线端点钳制：pos[a] 距卷轴口 ≤ a·ds（锚定段全长上限，防锚定Gap超标）
+    {
+      const p3 = this.pos[ANCHOR_SAMPLES];
+      _dir.copy(p3).sub(this.base[0]);
+      const d3 = _dir.length();
+      const maxD = ANCHOR_SAMPLES * this.ds;
+      if (d3 > maxD) {
+        p3.copy(this.base[0]).addScaledVector(_dir.multiplyScalar(1 / d3), maxD);
+        if (p3.y < 0.03) p3.y = 0.03;
+      }
+    }
+    for (let i = 0; i <= end; i++) this._pbdOrig[i].copy(this.pos[i]);
+    this.pos[end].copy(_pin);
+    for (let iter = 0; iter < 4; iter++) {
+      // 前向 pass：距前邻 = ds
+      for (let i = ANCHOR_SAMPLES + 1; i < end; i++) {
+        const p = this.pos[i];
+        const q = this.pos[i - 1];
+        _dir.copy(p).sub(q);
+        let len = _dir.length();
+        if (len < 1e-6) {
+          _dir.copy(this.tan0);
+          len = 1;
+        }
+        p.copy(q).addScaledVector(_dir, this.ds / len);
+        if (p.y < 0.03) p.y = 0.03;
+      }
+      // 后向 pass：距后邻 = ds
+      for (let i = end - 1; i > ANCHOR_SAMPLES; i--) {
+        const p = this.pos[i];
+        const q = this.pos[i + 1];
+        _dir.copy(p).sub(q);
+        let len = _dir.length();
+        if (len < 1e-6) {
+          _dir.copy(this.tan0);
+          len = 1;
+        }
+        p.copy(q).addScaledVector(_dir, this.ds / len);
+        if (p.y < 0.03) p.y = 0.03;
+      }
+      this.pos[end].copy(_pin);
+    }
+    if (alpha < 1) {
+      for (let i = 0; i <= end; i++) this.pos[i].lerpVectors(this._pbdOrig[i], this.pos[i], alpha);
+    }
+    for (let i = 0; i <= end; i++) this.vel[i].set(0, 0, 0);
   }
 
   /** 采样点 i 处的实时切线（写入 out） */
@@ -302,7 +533,7 @@ export class FilmStripPath {
   }
 }
 
-/** 由切线 + 侧倾角计算平躺卡片的姿态（长轴贴切线，法线朝上） */
+/** 由切线 + 侧倾角计算平躺胶片的姿态（长轴贴切线，法线朝上） */
 const _flat = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
 const _yaw = new THREE.Quaternion();
 const _roll = new THREE.Quaternion();

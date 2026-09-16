@@ -1,16 +1,19 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, Sparkles } from '@react-three/drei';
 import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing';
-import { FilmStripPath, CARD_PITCH, START_ARC, cardQuaternion, bankAngle, filmControl } from './filmCurve';
-import { FilmCard } from './FilmCard';
-import { FilmStripMesh } from './FilmStripMesh';
+import { FilmStripPath, CARD_PITCH, filmControl } from './filmCurve';
+import { FilmStrip } from './FilmStrip';
 import { archive } from '@/data/archive';
 import { matchesFilter, type ArchiveFilter } from '@/data/taxonomy';
-import { CARD_COUNT } from '@/lib/progress';
 
 const ROLL_RADIUS = 0.85;
+/** 测试期画格数（?frames=N 可调，默认 5） */
+const FILM_N = Math.min(
+  40,
+  Math.max(1, parseInt(new URLSearchParams(location.search).get('frames') || '5', 10) || 5),
+);
 
 interface DarkroomSceneProps {
   hovered: string | null;
@@ -46,25 +49,16 @@ function makeRollLabel(): THREE.CanvasTexture {
 }
 
 export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, onCardReady }: DarkroomSceneProps) {
-  const path = useMemo(() => new FilmStripPath(CARD_COUNT, CARD_PITCH), []);
+  const path = useMemo(() => new FilmStripPath(FILM_N, CARD_PITCH), []);
   const wDbg = window as unknown as { __filmPath?: FilmStripPath; __filmControl?: typeof filmControl };
   wDbg.__filmPath = path;
   wDbg.__filmControl = filmControl;
+  const filmEntries = useMemo(() => archive.slice(0, FILM_N), []);
   const labelTex = useMemo(() => makeRollLabel(), []);
   const rollRef = useRef<THREE.Group>(null);
+  const leaderRef = useRef<THREE.Mesh>(null);
   const controlsRef = useRef<any>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // 每张卡片的 Object3D 槽位（FilmCard 注册，这里每帧写位姿）
-  const cardObjs = useRef<(THREE.Object3D | null)[]>(archive.map(() => null));
-  // HoverRing 读取的实时槽位
-  const slots = useMemo(
-    () => archive.map(() => ({ pos: new THREE.Vector3(), quat: new THREE.Quaternion() })),
-    [],
-  );
-  const registerCard = useCallback((i: number, o: THREE.Object3D | null) => {
-    cardObjs.current[i] = o;
-  }, []);
 
   // 光标世界坐标 / 活跃度（engage：0=胶片归位，1=满牵引）
   const cursorWorld = useRef(new THREE.Vector3(999, 0, 999));
@@ -72,9 +66,8 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   const engage = useRef(0);
   const cursorLightRef = useRef<THREE.PointLight>(null);
   const _v = useMemo(() => new THREE.Vector3(), []);
+  const _v2 = useMemo(() => new THREE.Vector3(), []);
   const _dir = useMemo(() => new THREE.Vector3(), []);
-  const _tan = useMemo(() => new THREE.Vector3(), []);
-  const _q = useMemo(() => new THREE.Quaternion(), []);
   const _qSpin = useMemo(() => new THREE.Quaternion(), []);
   const _YUP = useMemo(() => new THREE.Vector3(0, 1, 0), []);
 
@@ -87,14 +80,25 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
 
   useFrame(({ clock, camera, pointer }, delta) => {
     const dt = Math.min(delta, 0.05);
-    const w = window as unknown as { __sceneTick?: number; __pointer?: number[]; __film?: unknown };
+    const w = window as unknown as { __sceneTick?: number; __pointer?: number[]; __film?: unknown; __reelPx?: number[] };
     w.__sceneTick = (w.__sceneTick ?? 0) + 1;
     w.__pointer = [pointer.x, pointer.y];
-    w.__film = { out: filmControl.outLength, engage: engage.current, cw: [cursorWorld.current.x.toFixed(2), cursorWorld.current.z.toFixed(2)] };
-    // 卷轴绕自身横轴旋转 = 已拉出片长 / 半径（鼠标拉出 ↔ 退卷，收卷 ↔ 卷回）
+    w.__film = { out: filmControl.outLength, engage: engage.current, mode: filmControl.mode };
+    // 卷轴头屏幕坐标（测试脚本点击用）
+    _v2.set(rollPos.x, ROLL_RADIUS, rollPos.z).project(camera);
+    w.__reelPx = [
+      Math.round((_v2.x * 0.5 + 0.5) * window.innerWidth),
+      Math.round((-_v2.y * 0.5 + 0.5) * window.innerHeight),
+    ];
+
+    // 卷轴绕自身横轴旋转 = 已拉出片长 / 半径（退卷 ↔ 卷回）
     if (rollRef.current) {
       _qSpin.setFromAxisAngle(_YUP, -(filmControl.outLength / ROLL_RADIUS));
       rollRef.current.quaternion.copy(qAlign).multiply(_qSpin);
+    }
+    // 片头：收纳/刚开始拉时可见，拉出后由连续胶片接替
+    if (leaderRef.current) {
+      leaderRef.current.visible = filmControl.outLength < 0.5;
     }
 
     // —— 光标 → 工作台面的世界坐标（限幅在台面范围内） ——
@@ -113,19 +117,8 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
     const engTarget = Math.min(1, speed * 0.35);
     engage.current += (engTarget - engage.current) * Math.min(1, dt * (engTarget > engage.current ? 6 : 1.6));
 
-    // —— 链式弹簧仿真：鼠标轨迹驱动胶卷带 ——
+    // —— 链式弹簧仿真：状态机（idle/drawing/locked/rewinding） ——
     path.update(clock.elapsedTime, cursorWorld.current, engage.current, dt);
-    for (let i = 0; i < archive.length; i++) {
-      const obj = cardObjs.current[i];
-      if (!obj) continue;
-      const k = path.cardIndex(i);
-      obj.position.copy(path.pos[k]);
-      path.tangentAt(k, _tan);
-      cardQuaternion(_tan, bankAngle(path, k, _tan), _q);
-      obj.quaternion.copy(_q);
-      slots[i].pos.copy(obj.position);
-      slots[i].quat.copy(_q);
-    }
 
     // —— 红色安全灯光跟随光标（照到哪里亮到哪里） ——
     if (cursorLightRef.current) {
@@ -145,6 +138,24 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   };
 
   const rollPos = useMemo(() => path.pos[0] ?? new THREE.Vector3(), [path]);
+
+  // 点击胶卷头：idle→drawing / locked→drawing（继续拉）
+  const handleHeadClick = (e: { stopPropagation: () => void }) => {
+    e.stopPropagation();
+    path.startDrawing();
+  };
+  const handleHeadOver = () => {
+    document.body.style.cursor = 'pointer';
+  };
+  const handleHeadOut = () => {
+    document.body.style.cursor = 'auto';
+  };
+  // 点击台面：drawing→locked（确认位置）
+  const handleTableClick = () => {
+    path.lock();
+  };
+
+  const hoveredIdx = hovered ? filmEntries.findIndex((e) => e.id === hovered) : -1;
 
   return (
     <>
@@ -170,13 +181,18 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       {/* 注：安全灯只保留光源，不渲染灯泡实体 */}
 
       {/* ———— 暗房工作台面 ———— */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow onClick={handleTableClick}>
         <circleGeometry args={[90, 64]} />
         <meshStandardMaterial color="#110d0a" roughness={0.92} metalness={0.08} />
       </mesh>
 
       {/* ———— 胶卷卷轴（侧立：轴水平，立于台面，胶片从底部切向吐出） ———— */}
-      <group position={[rollPos.x, ROLL_RADIUS, rollPos.z]}>
+      <group
+        position={[rollPos.x, ROLL_RADIUS, rollPos.z]}
+        onClick={handleHeadClick}
+        onPointerOver={handleHeadOver}
+        onPointerOut={handleHeadOut}
+      >
         <group ref={rollRef} quaternion={qAlign}>
           {/* 筒身 */}
           <mesh castShadow>
@@ -211,43 +227,36 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
           </mesh>
         </group>
       </group>
-      {/* 吐出的片头：贴台，指向带身起点方向（切向离开卷轴底部） */}
+      {/* 吐出的片头：贴台，指向带身起点方向（点击它开始拉片） */}
       <mesh
+        ref={leaderRef}
         position={[rollPos.x + tan0.x * (ROLL_RADIUS + 0.75), 0.05, rollPos.z + tan0.z * (ROLL_RADIUS + 0.75)]}
         rotation={[-Math.PI / 2, Math.atan2(tan0.x, tan0.z), 0]}
         rotation-order="YXZ"
+        onClick={handleHeadClick}
+        onPointerOver={handleHeadOver}
+        onPointerOut={handleHeadOut}
       >
         <planeGeometry args={[1.6, 0.62]} />
         <meshStandardMaterial color="#14100c" roughness={0.6} side={THREE.DoubleSide} />
       </mesh>
 
-      {/* ———— 连续胶片条带（铺在卡片下方的实体胶片，从卷轴连到尾端） ———— */}
-      <FilmStripMesh path={path} />
+      {/* ———— 连续胶片（唯一主体：胶片边缘/宽度/连续表面/齿孔 + 画格一体成型） ———— */}
+      <FilmStrip
+        path={path}
+        entries={filmEntries}
+        totalCount={archive.length}
+        dimmed={(e) => !matchesFilter(e, filter)}
+        selected={selected}
+        onHover={onHover}
+        onSelect={onSelect}
+        onReady={onCardReady}
+      />
 
-      {/* ———— 底片帧链（胶卷带） ———— */}
-      {archive.map((entry, i) => (
-        <FilmCard
-          key={entry.id}
-          entry={entry}
-          index={i}
-          arcPos={START_ARC + i * CARD_PITCH}
-          totalLength={path.total}
-          selected={selected === entry.id}
-          dimmed={!matchesFilter(entry, filter)}
-          onHover={onHover}
-          onSelect={onSelect}
-          onReady={onCardReady}
-          registerRef={registerCard}
-        />
-      ))}
-
-      {/* 悬停提示光圈（被筛选淡化的卡片不显示） */}
-      {hovered &&
-        matchesFilter(archive.find((e) => e.id === hovered) ?? archive[0], filter) &&
-        (() => {
-          const idx = archive.findIndex((e) => e.id === hovered);
-          return idx >= 0 ? <HoverRing slot={slots[idx]} /> : null;
-        })()}
+      {/* 悬停提示光圈（被筛选淡化的画格不显示） */}
+      {hoveredIdx >= 0 && !dimmedEntry(filmEntries[hoveredIdx], filter) && (
+        <HoverRing path={path} index={hoveredIdx} />
+      )}
 
       {/* 暗房浮尘 */}
       <Sparkles count={130} scale={[34, 9, 34]} position={[0, 4, 0]} size={1.6} speed={0.18} opacity={0.22} color="#ff4526" />
@@ -281,6 +290,10 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   );
 }
 
+function dimmedEntry(entry: (typeof archive)[number], filter: ArchiveFilter): boolean {
+  return !matchesFilter(entry, filter);
+}
+
 function PerspectiveRig() {
   const { camera } = useThree();
   useMemo(() => {
@@ -290,25 +303,27 @@ function PerspectiveRig() {
   return null;
 }
 
-interface Slot {
-  pos: THREE.Vector3;
-  quat: THREE.Quaternion;
-}
-
-function HoverRing({ slot }: { slot: Slot }) {
+/** 悬停光圈：贴在胶片画格上方的呼吸线框 */
+function HoverRing({ path, index }: { path: FilmStripPath; index: number }) {
   const ref = useRef<THREE.Mesh>(null);
+  const _tan = useMemo(() => new THREE.Vector3(), []);
+  const _Y = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const _flat = useMemo(() => new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0)), []);
+  const _yaw = useMemo(() => new THREE.Quaternion(), []);
   useFrame(({ clock }) => {
-    if (ref.current) {
-      ref.current.position.copy(slot.pos);
-      ref.current.position.y += 0.01;
-      ref.current.quaternion.copy(slot.quat);
-      const s = 1.08 + Math.sin(clock.elapsedTime * 4) * 0.02;
-      ref.current.scale.set(s, s, s);
-    }
+    if (!ref.current) return;
+    const k = path.cardIndex(index);
+    ref.current.position.copy(path.pos[k]);
+    ref.current.position.y += 0.01;
+    path.tangentAt(k, _tan);
+    _yaw.setFromAxisAngle(_Y, Math.atan2(_tan.x, _tan.z));
+    ref.current.quaternion.copy(_yaw).multiply(_flat);
+    const s = 1.08 + Math.sin(clock.elapsedTime * 4) * 0.02;
+    ref.current.scale.set(s, s, s);
   });
   return (
     <mesh ref={ref}>
-      <planeGeometry args={[1.75, 2.55]} />
+      <planeGeometry args={[2.2, 1.3]} />
       <meshBasicMaterial color="#ff4a2a" wireframe transparent opacity={0.35} depthWrite={false} />
     </mesh>
   );
