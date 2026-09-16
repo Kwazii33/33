@@ -27,6 +27,10 @@ const ANCHOR_SAMPLES = 3; // 出口锚定段数（固定在卷轴切向出口线
 const ANCHOR_BLEND_END = ANCHOR_SAMPLES + 6; // 冻结态「朝卷轴侧」约束的覆盖末端
 const TRAIL_MIN_DIST = 0.07; // 轨迹记录最小间距
 const REWIND_SPEED = 7; // 倒卷速度（恒定，单位/秒）——不加速不减速，丝滑匀速回收
+// —— 胶卷头动力学限制（鼠标只给方向意图，不是直接绘制胶片形状） ——
+const HEAD_VMAX = 14; // 胶卷头最大速度（单位/秒）——鼠标再快胶片头也只这么快
+const HEAD_OMEGA = 3.6; // 最大转向速率（弧度/秒）——禁止瞬间 90° 转折，90° 至少需 0.44s
+const HEAD_ACCEL = 45; // 加速度上限（平滑起步/缓冲停止）
 
 export type FilmMode = 'idle' | 'drawing' | 'locked' | 'rewinding';
 
@@ -79,6 +83,8 @@ export class FilmStripPath {
   private vsnap: THREE.Vector3[] = [];
   /** 实时位置（直接读取） */
   readonly pos: THREE.Vector3[] = [];
+  /** 胶卷头速度（转向速率/速度/加速度受限——惯性缓冲的核心状态） */
+  private hv = new THREE.Vector3();
   /** 弹簧追随后的光标（带惯性） */
   private cur = new THREE.Vector3();
   private out = 0;
@@ -240,11 +246,38 @@ export class FilmStripPath {
     }
     const rewinding = filmControl.mode === 'rewinding';
 
-    // 光标弹簧（惯性 + 延迟）——locked/idle 时不追随
+    // 胶卷头动力学（drawing）：鼠标只控制运动意图——
+    // 速度上限（VMAX）+ 转向速率上限（OMEGA）+ 加速度上限（ACCEL）。
+    // 鼠标猛甩/急转时胶片头以惯性缓冲走弧线跟随，禁止瞬间 90° 转折。
+    // locked/idle/rewinding 时不追随，速度衰减清零（重入 drawing 不跳变）。
     if (mode === 'drawing') {
-      const ck = Math.min(1, dt * 9);
-      this.cur.x += (cursor.x - this.cur.x) * ck;
-      this.cur.z += (cursor.z - this.cur.z) * ck;
+      const dx = cursor.x - this.cur.x;
+      const dz = cursor.z - this.cur.z;
+      const dist = Math.hypot(dx, dz);
+      const wantV = Math.min(HEAD_VMAX, dist * 6);
+      const sp = Math.hypot(this.hv.x, this.hv.z);
+      if (sp < 1e-3) {
+        if (dist > 1e-4 && wantV > 0) {
+          const a0 = Math.atan2(dz, dx);
+          const v0 = Math.min(wantV, HEAD_ACCEL * dt);
+          this.hv.set(Math.cos(a0) * v0, 0, Math.sin(a0) * v0);
+        }
+      } else {
+        const curA = Math.atan2(this.hv.z, this.hv.x);
+        let dA = dist > 1e-4 ? Math.atan2(dz, dx) - curA : 0;
+        while (dA > Math.PI) dA -= Math.PI * 2;
+        while (dA < -Math.PI) dA += Math.PI * 2;
+        const maxTurn = HEAD_OMEGA * dt;
+        const turn = Math.max(-maxTurn, Math.min(maxTurn, dA));
+        let newSp = sp + Math.max(-HEAD_ACCEL * dt, Math.min(HEAD_ACCEL * dt, wantV - sp));
+        if (engage < 0.02) newSp = Math.max(0, sp - HEAD_ACCEL * dt * 1.5); // 鼠标停：逐渐减速
+        const newA = curA + turn;
+        this.hv.set(Math.cos(newA) * newSp, 0, Math.sin(newA) * newSp);
+      }
+      this.cur.x += this.hv.x * dt;
+      this.cur.z += this.hv.z * dt;
+    } else {
+      this.hv.multiplyScalar(Math.max(0, 1 - dt * 10));
     }
 
     if (rewinding) {
@@ -336,11 +369,19 @@ export class FilmStripPath {
     const h = dt / steps;
     for (let s = 0; s < steps; s++) this.step(k, h, frontBlend);
 
+    // drawing（未拉满）：软物理约束——曲率钳制（限最小转弯半径）+ 软等长（不可拉伸）。
+    // 与冻结 PBD 互斥（拉满/锁定走 frozenNow 分支）。
+    if (!rewinding && mode === 'drawing' && this.out > 0 && this.out < this.maxOut - 1e-6) {
+      this.curvatureClamp(k);
+      this.softConstraints(k, dt);
+    }
+
     // 冻结态（locked / 拉满兜底）：PBD 位置约束——整条链收成 ds 等长、不可拉伸。
     // 卷轴侧优先（前向从锚定线收），片尾钉在 tip；带强度斜坡（0.6s），
     // 避免锁定瞬间硬跳变。拉伸不再囤积在出口锚定段。
     const frozenNow = !rewinding && this.out > 0 && (mode === 'locked' || mode === 'idle' || this.out >= this.maxOut - 1e-6);
     if (frozenNow) {
+      this.curvatureClamp(k);
       this.freezeBlend = Math.min(1, this.freezeBlend + dt / 0.6);
       this.pbdRelax(k, this.freezeBlend);
     } else {
@@ -456,6 +497,61 @@ export class FilmStripPath {
           this.base[0].z + this.tan0.z * i * this.ds,
         );
         this.vel[i].set(0, 0, 0);
+      }
+    }
+  }
+
+  /**
+   * 曲率钳制（前向扫描，单遍）：相邻段夹角超过 MAX_TURN 时，将下游段绕顶点旋回限值。
+   * 限制最小转弯半径、消除急弯/折叠/回头——只做单调角度缩减，不与任何投影反复打架。
+   * ds=0.605、MAX_TURN=0.5rad → 最小转弯半径 ≈ 1.2u。
+   */
+  private curvatureClamp(k: number) {
+    const n = this.sampleCount;
+    const end = Math.min(k, n - 1);
+    const MAXA = 0.5; // rad/段 ≈ 28.6°
+    for (let i = ANCHOR_SAMPLES + 1; i < end; i++) {
+      const p0 = this.pos[i - 1];
+      const p1 = this.pos[i];
+      const p2 = this.pos[i + 1];
+      const ax = p1.x - p0.x;
+      const az = p1.z - p0.z;
+      const bx = p2.x - p1.x;
+      const bz = p2.z - p1.z;
+      const la = Math.hypot(ax, az);
+      const lb = Math.hypot(bx, bz);
+      if (la < 1e-6 || lb < 1e-6) continue;
+      const aAng = Math.atan2(az, ax);
+      let d = Math.atan2(bz, bx) - aAng;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      if (Math.abs(d) > MAXA) {
+        const na = aAng + Math.sign(d) * MAXA;
+        p2.x = p1.x + Math.cos(na) * lb;
+        p2.z = p1.z + Math.sin(na) * lb;
+      }
+    }
+  }
+
+  /**
+   * drawing 态软物理约束（保留弹簧惯性手感，不钉速度）：
+   * 软等长投影——每段向 ds 靠拢 35%，胶片不可无限拉伸。
+   * 锚定侧与片头端不强制：两端形状由卷轴/胶卷头决定。
+   */
+  private softConstraints(k: number, dt: number) {
+    const n = this.sampleCount;
+    const end = Math.min(k, n - 1);
+    if (end < ANCHOR_SAMPLES + 3) return;
+    for (let iter = 0; iter < 2; iter++) {
+      for (let i = ANCHOR_SAMPLES + 1; i <= end; i++) {
+        const p = this.pos[i];
+        const q = this.pos[i - 1];
+        _dir.copy(p).sub(q);
+        const len = _dir.length();
+        if (len < 1e-6) continue;
+        const diff = ((len - this.ds) / len) * 0.35;
+        p.addScaledVector(_dir, -diff * 0.5);
+        q.addScaledVector(_dir, diff * 0.5);
       }
     }
   }
