@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { useFrame, type ThreeEvent } from '@react-three/fiber';
-import { FilmStripPath, CARD_PITCH, START_ARC, filmControl } from './filmCurve';
+import { FilmStripPath, CARD_PITCH, START_ARC, filmControl, filmGlow } from './filmCurve';
 import type { ArchiveEntry } from '@/data/archive';
 
 /**
@@ -189,13 +189,19 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
   }, [path]);
 
   const _t = useMemo(() => new THREE.Vector3(), []);
+  const matRef = useRef<THREE.MeshStandardMaterial>(null);
   useFrame(() => {
+    // 统一 hover 微照亮：距离驱动的 emissive 渐变（近亮远暗，smooth）
+    if (matRef.current) {
+      matRef.current.emissiveIntensity = 0.55 + filmGlow.value * 0.5;
+    }
     const posAttr = geo.getAttribute('position') as THREE.BufferAttribute;
     const k = Math.max(0, Math.min(path.sampleCount - 1, Math.floor(filmControl.outLength / path.ds)));
     (window as unknown as { __stripInfo?: unknown }).__stripInfo = {
       k,
       out: filmControl.outLength,
       mode: filmControl.mode,
+      glow: filmGlow.value,
       visible: geo.drawRange.count,
     };
     if (k < 2) {
@@ -287,10 +293,11 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
       onDoubleClick={handleDbl}
     >
       <meshStandardMaterial
+        ref={matRef}
         map={atlas.tex}
         emissive="#ff2d18"
         emissiveMap={atlas.tex}
-        emissiveIntensity={0.6}
+        emissiveIntensity={0.55}
         roughness={0.55}
         metalness={0.12}
         side={THREE.DoubleSide}

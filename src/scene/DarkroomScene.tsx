@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Sparkles } from '@react-three/drei';
 import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing';
-import { FilmStripPath, CARD_PITCH, filmControl } from './filmCurve';
+import { FilmStripPath, CARD_PITCH, filmControl, filmGlow } from './filmCurve';
 import { FilmStrip, STRIP_W } from './FilmStrip';
 import { archive } from '@/data/archive';
 import { matchesFilter, type ArchiveFilter } from '@/data/taxonomy';
@@ -67,7 +67,6 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   const lastCursor = useRef(new THREE.Vector3(999, 0, 999));
   const engage = useRef(0);
   const cursorLightRef = useRef<THREE.PointLight>(null);
-  const hoverLightRef = useRef<THREE.PointLight>(null);
   const _v = useMemo(() => new THREE.Vector3(), []);
   const _v2 = useMemo(() => new THREE.Vector3(), []);
   const _dir = useMemo(() => new THREE.Vector3(), []);
@@ -126,12 +125,20 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
         Math.min(1, dt * 6),
       );
     }
-    // —— hover 微照亮：低悬台面的小盏跟光，鼠标靠近胶片时画格被微微照亮（与卷轴同等待遇） ——
-    if (hoverLightRef.current) {
-      hoverLightRef.current.position.lerp(
-        _v.set(cursorWorld.current.x, 0.85, cursorWorld.current.z),
-        Math.min(1, dt * 10),
-      );
+    // —— 统一 hover 检测：光标到卷轴表面 / 胶片主体各采样点的最近距离 → 0..1 邻近度 ——
+    // 驱动胶片 emissive 渐变（FilmStrip 消费）：近亮远暗、平滑过渡、无光圈
+    {
+      const kActive = Math.max(0, Math.min(path.sampleCount - 1, Math.floor(filmControl.outLength / path.ds)));
+      let best = Math.hypot(cursorWorld.current.x - rollPos.x, cursorWorld.current.z - rollPos.z) - ROLL_RADIUS;
+      for (let i = 0; i <= kActive; i++) {
+        const p = path.pos[i];
+        const d = Math.hypot(cursorWorld.current.x - p.x, cursorWorld.current.z - p.z);
+        if (d < best) best = d;
+      }
+      const HOVER_R = 3.2;
+      const prox = Math.max(0, Math.min(1, 1 - best / HOVER_R));
+      const g = prox * prox * (3 - 2 * prox); // smoothstep 缓入缓出
+      filmGlow.value += (g - filmGlow.value) * Math.min(1, dt * 5);
     }
   });
 
@@ -200,8 +207,6 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       <pointLight position={[rollPos.x, 2.4, rollPos.z]} intensity={22} distance={11} color="#ff2a15" />
       {/* 跟随光标的红色安全灯：照到哪里，哪里显影 */}
       <pointLight ref={cursorLightRef} position={[0, 2.2, 0]} intensity={26} distance={9} color="#ff3517" />
-      {/* hover 微照亮：低悬台面小盏，贴近照亮胶片/卷轴表面 */}
-      <pointLight ref={hoverLightRef} position={[0, 0.85, 0]} intensity={11} distance={4.2} color="#ff4522" />
       {/* 注：安全灯只保留光源，不渲染灯泡实体 */}
 
       {/* ———— 暗房工作台面 ———— */}

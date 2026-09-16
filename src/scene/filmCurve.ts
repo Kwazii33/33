@@ -54,6 +54,13 @@ export function framesOut(out: number, cardCount: number): number {
   return Math.max(0, Math.min(cardCount, Math.floor((out - START_ARC) / CARD_PITCH) + 1));
 }
 
+/**
+ * 胶片 hover 发光 0..1：DarkroomScene 每帧按「光标到卷轴/胶片主体最近距离」驱动，
+ * FilmStrip 消费（emissiveIntensity 基值 + glow·增益）。统一逻辑覆盖胶卷头、
+ * 胶片主体、所有画格。
+ */
+export const filmGlow = { value: 0 };
+
 const _tgt = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _tip = new THREE.Vector3();
