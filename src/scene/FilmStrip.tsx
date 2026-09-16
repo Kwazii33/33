@@ -10,7 +10,7 @@ import type { ArchiveEntry } from '@/data/archive';
  * 弯曲时胶片整体弯曲，画格跟随变形，不存在「图片漂浮在轨迹线上」。
  * 纹理为图集：胶片基底 + 边缘 + 齿孔 + 每格画窗（图片等比留黑框）。
  */
-const STRIP_W = 1.75; // 胶片宽
+export const STRIP_W = 1.75; // 胶片宽（卷轴筒身长度与其一致：胶片沿轴向绕卷）
 const TEX_H = 256;
 const WIN_V0 = 0.22; // 画窗 v 向上下留白（齿孔区）
 const WIN_V1 = 0.78;

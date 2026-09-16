@@ -4,7 +4,7 @@ import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, Sparkles } from '@react-three/drei';
 import { EffectComposer, Bloom, Noise, Vignette } from '@react-three/postprocessing';
 import { FilmStripPath, CARD_PITCH, filmControl } from './filmCurve';
-import { FilmStrip } from './FilmStrip';
+import { FilmStrip, STRIP_W } from './FilmStrip';
 import { archive } from '@/data/archive';
 import { matchesFilter, type ArchiveFilter } from '@/data/taxonomy';
 
@@ -217,14 +217,14 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
         onPointerOut={handleHeadOut}
       >
         <group ref={rollRef} quaternion={qAlign}>
-          {/* 筒身 */}
+          {/* 筒身：轴向长度 = 胶片宽（胶片沿轴向绕卷，宽度一致） */}
           <mesh castShadow>
-            <cylinderGeometry args={[ROLL_RADIUS, ROLL_RADIUS, 0.95, 48]} />
+            <cylinderGeometry args={[ROLL_RADIUS, ROLL_RADIUS, STRIP_W, 48]} />
             <meshStandardMaterial color="#100d0a" roughness={0.35} metalness={0.55} />
           </mesh>
           {/* 标签带（微弱自发光，安全灯下可辨认） */}
           <mesh>
-            <cylinderGeometry args={[ROLL_RADIUS + 0.02, ROLL_RADIUS + 0.02, 0.5, 48]} />
+            <cylinderGeometry args={[ROLL_RADIUS + 0.02, ROLL_RADIUS + 0.02, STRIP_W * 0.62, 48]} />
             <meshStandardMaterial
               map={labelTex}
               roughness={0.5}
@@ -235,16 +235,16 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
             />
           </mesh>
           {/* 两侧盖 */}
-          <mesh castShadow position={[0, 0.515, 0]}>
+          <mesh castShadow position={[0, STRIP_W / 2 + 0.04, 0]}>
             <cylinderGeometry args={[ROLL_RADIUS + 0.04, ROLL_RADIUS + 0.04, 0.08, 48]} />
             <meshStandardMaterial color="#1a1510" roughness={0.4} metalness={0.6} />
           </mesh>
-          <mesh castShadow position={[0, -0.515, 0]}>
+          <mesh castShadow position={[0, -STRIP_W / 2 - 0.04, 0]}>
             <cylinderGeometry args={[ROLL_RADIUS + 0.04, ROLL_RADIUS + 0.04, 0.08, 48]} />
             <meshStandardMaterial color="#1a1510" roughness={0.4} metalness={0.6} />
           </mesh>
           {/* 轴芯凸台 */}
-          <mesh position={[0, 0.575, 0]}>
+          <mesh position={[0, STRIP_W / 2 + 0.1, 0]}>
             <cylinderGeometry args={[0.24, 0.24, 0.1, 24]} />
             <meshStandardMaterial color="#0a0806" roughness={0.6} metalness={0.3} />
           </mesh>
