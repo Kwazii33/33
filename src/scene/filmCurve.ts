@@ -76,7 +76,6 @@ export class FilmStripPath {
   readonly tan0: THREE.Vector3;
 
   private base: THREE.Vector3[] = [];
-  private phase: number[] = [];
   private vel: THREE.Vector3[] = [];
   private snap: THREE.Vector3[] = [];
   private vsnap: THREE.Vector3[] = [];
@@ -140,7 +139,6 @@ export class FilmStripPath {
       const u = Math.min(1, (i * this.ds) / totalLen);
       const p = curve.getPointAt(u);
       this.base.push(p);
-      this.phase.push(hash01(i, 2) * Math.PI * 2);
       this.pos.push(p.clone());
       this.vel.push(new THREE.Vector3());
       this.snap.push(p.clone());
@@ -204,7 +202,7 @@ export class FilmStripPath {
     const c = this.base[0];
     for (let i = 1; i < this.sampleCount; i++) {
       const th = i * 0.6;
-      this.pos[i].set(c.x + this.tan0.x * 0.28 + Math.cos(th) * 0.1, 0.08 + (i % 5) * 0.012, c.z + this.tan0.z * 0.28 + Math.sin(th) * 0.1);
+      this.pos[i].set(c.x + this.tan0.x * 0.28 + Math.cos(th) * 0.1, 0.05, c.z + this.tan0.z * 0.28 + Math.sin(th) * 0.1);
       this.vel[i].set(0, 0, 0);
     }
     this.lastK = 0;
@@ -315,8 +313,9 @@ export class FilmStripPath {
       this.vsnap[i].copy(this.vel[i]);
     }
 
-    // tip 目标
-    const lift = (0.55 + 0.22 * Math.sin(t * 1.7)) * engage + 0.05;
+    // tip 目标——胶片是严格平面的纸带：所有状态片头高度恒定 0.05，
+    // 无升沉、无波浪、无 cloth 式起伏（2D 平面运动，只有路径方向变化）
+    const lift = 0.05;
     if (rewinding) {
       // 沿 trail 反向插值（贴台面滑回）
       this.trailPointAt(this.rewindWalked, _tip);
@@ -443,7 +442,7 @@ export class FilmStripPath {
         _dir.multiplyScalar(1 / len);
       }
       _tgt.copy(this.snap[i - 1]).addScaledVector(_dir, this.ds);
-      if (_tgt.y < 0.04) _tgt.y = 0.04 + Math.sin(this.phase[i] + i * 0.7) * 0.012;
+      if (_tgt.y !== 0.05) _tgt.y = 0.05;
       return;
     }
     _dir.copy(this.snap[i]).sub(this.snap[i + 1]);
@@ -455,7 +454,7 @@ export class FilmStripPath {
     }
     _tgt.copy(this.snap[i + 1]).addScaledVector(_dir, this.ds);
     // 贴台微高（除 tip 外不主动抬升）
-    if (_tgt.y < 0.04) _tgt.y = 0.04 + Math.sin(this.phase[i] + i * 0.7) * 0.012;
+    if (_tgt.y !== 0.05) _tgt.y = 0.05;
   }
 
   private step(k: number, dt: number, frontBlend: boolean) {
@@ -481,7 +480,7 @@ export class FilmStripPath {
     for (let i = 0; i <= a && i < n; i++) {
       this.pos[i].set(
         this.base[0].x + this.tan0.x * i * this.ds,
-        0.03,
+        0.05,
         this.base[0].z + this.tan0.z * i * this.ds,
       );
       this.vel[i].set(0, 0, 0);
