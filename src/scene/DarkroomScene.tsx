@@ -67,6 +67,7 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
   const lastCursor = useRef(new THREE.Vector3(999, 0, 999));
   const engage = useRef(0);
   const cursorLightRef = useRef<THREE.PointLight>(null);
+  const hoverLightRef = useRef<THREE.PointLight>(null);
   const _v = useMemo(() => new THREE.Vector3(), []);
   const _v2 = useMemo(() => new THREE.Vector3(), []);
   const _dir = useMemo(() => new THREE.Vector3(), []);
@@ -123,6 +124,13 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       cursorLightRef.current.position.lerp(
         _v.set(cursorWorld.current.x, 2.2, cursorWorld.current.z),
         Math.min(1, dt * 6),
+      );
+    }
+    // —— hover 微照亮：低悬台面的小盏跟光，鼠标靠近胶片时画格被微微照亮（与卷轴同等待遇） ——
+    if (hoverLightRef.current) {
+      hoverLightRef.current.position.lerp(
+        _v.set(cursorWorld.current.x, 0.85, cursorWorld.current.z),
+        Math.min(1, dt * 10),
       );
     }
   });
@@ -192,6 +200,8 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       <pointLight position={[rollPos.x, 2.4, rollPos.z]} intensity={22} distance={11} color="#ff2a15" />
       {/* 跟随光标的红色安全灯：照到哪里，哪里显影 */}
       <pointLight ref={cursorLightRef} position={[0, 2.2, 0]} intensity={26} distance={9} color="#ff3517" />
+      {/* hover 微照亮：低悬台面小盏，贴近照亮胶片/卷轴表面 */}
+      <pointLight ref={hoverLightRef} position={[0, 0.85, 0]} intensity={11} distance={4.2} color="#ff4522" />
       {/* 注：安全灯只保留光源，不渲染灯泡实体 */}
 
       {/* ———— 暗房工作台面 ———— */}

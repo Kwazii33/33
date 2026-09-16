@@ -386,11 +386,34 @@ export class FilmStripPath {
       this.freezeBlend = 0;
     }
 
+    // 硬可达域：不可拉伸胶片锚在卷轴口——任意样本距锚点不可能超过其弧长上限。
+    // 弹簧在极端拖拽下即使失稳也不可能飞出这个域（钳位时泄速，能量有出口）。
+    for (let i = 1; i <= k && i < n; i++) {
+      const p = this.pos[i];
+      const dx = p.x - this.base[0].x;
+      const dz = p.z - this.base[0].z;
+      const maxR = (i + 1) * this.ds;
+      const d = Math.hypot(dx, dz);
+      if (d > maxR) {
+        const f = maxR / d;
+        p.x = this.base[0].x + dx * f;
+        p.z = this.base[0].z + dz * f;
+        this.vel[i].multiplyScalar(0.5);
+      }
+    }
+
     // 失稳保险（探针覆盖 tip 本身与其后一样本——tip 跑飞时 k+1 已冻结探不到）
     const probe = this.pos[Math.min(n - 1, k + 1)];
     const probeTip = this.pos[k];
     if (!Number.isFinite(probe.x + probe.y + probe.z) || !Number.isFinite(probeTip.x + probeTip.y + probeTip.z) ||
         Math.abs(probe.x) + Math.abs(probe.z) > 500 || Math.abs(probeTip.x) + Math.abs(probeTip.z) > 500) {
+      (window as unknown as { __guardHit?: unknown }).__guardHit = {
+        probe: { x: probe.x, y: probe.y, z: probe.z },
+        tip: { x: probeTip.x, y: probeTip.y, z: probeTip.z },
+        out: this.out, k, mode: filmControl.mode,
+        cur: { x: this.cur.x, z: this.cur.z },
+        hv: { x: this.hv.x, z: this.hv.z },
+      };
       this.out = 0;
       filmControl.mode = 'idle';
       this.trail.length = 0;
