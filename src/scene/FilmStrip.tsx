@@ -120,13 +120,13 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
         }
       }
     }
-    // 画窗（黑框底 + 等比图片），位置 = 弧长坐标
+    // 画窗（暖黑框底 + 等比图片·提亮如透光底片），位置 = 弧长坐标
     const wy0 = TEX_H * WIN_V0;
     const wy1 = TEX_H * WIN_V1;
     for (let i = 0; i < n; i++) {
       const wx0 = (START_ARC + i * CARD_PITCH + FRAME_INSET) * u;
       const wx1 = (START_ARC + i * CARD_PITCH + CARD_PITCH - 0.2 - FRAME_INSET) * u;
-      x.fillStyle = '#000000';
+      x.fillStyle = '#140806';
       x.fillRect(wx0, wy0, wx1 - wx0, wy1 - wy0);
       const img = imagesRef.current[i];
       if (img && img.complete && img.naturalWidth > 0) {
@@ -136,7 +136,11 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
         let dh = wy1 - wy0;
         if (ir > wr) dh = dw / ir;
         else dw = dh * ir;
+        // 底片透光感：亮度提升 + 轻对比，安全灯下画窗内容可读
+        const prevFilter = x.filter;
+        x.filter = 'brightness(2.3) contrast(1.12)';
         x.drawImage(img, wx0 + (wx1 - wx0 - dw) / 2, wy0 + (wy1 - wy0 - dh) / 2, dw, dh);
+        x.filter = prevFilter;
       }
       // 筛选淡化
       if (dimmedArr[i]) {
@@ -282,7 +286,15 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
       onClick={handleClick}
       onDoubleClick={handleDbl}
     >
-      <meshStandardMaterial map={atlas.tex} roughness={0.55} metalness={0.12} side={THREE.DoubleSide} />
+      <meshStandardMaterial
+        map={atlas.tex}
+        emissive="#ff2d18"
+        emissiveMap={atlas.tex}
+        emissiveIntensity={0.6}
+        roughness={0.55}
+        metalness={0.12}
+        side={THREE.DoubleSide}
+      />
     </mesh>
   );
 }
