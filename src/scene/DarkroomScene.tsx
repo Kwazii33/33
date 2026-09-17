@@ -92,6 +92,14 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       Math.round((_v2.x * 0.5 + 0.5) * window.innerWidth),
       Math.round((-_v2.y * 0.5 + 0.5) * window.innerHeight),
     ];
+    // 世界坐标 → 屏幕像素（测试脚本精确定位画格用）
+    w.__proj = (x: number, y: number, z: number) => {
+      _v2.set(x, y, z).project(camera);
+      return [
+        Math.round((_v2.x * 0.5 + 0.5) * window.innerWidth),
+        Math.round((-_v2.y * 0.5 + 0.5) * window.innerHeight),
+      ];
+    };
 
     // 卷轴绕自身横轴旋转 = 已拉出片长 / 半径（退卷 ↔ 卷回）
     if (rollRef.current) {

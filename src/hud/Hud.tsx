@@ -12,6 +12,7 @@ const IS_LEGACY = new URLSearchParams(location.search).get('v') === 'spiral';
 interface HudProps {
   hovered: string | null;
   selected: string | null;
+  inspect?: boolean; // 胶片单击的放大检视（显影详情卡，不受密度滑杆限制）
   developed: number;
   filter: ArchiveFilter;
   onSetFilter: (f: ArchiveFilter) => void;
@@ -37,7 +38,7 @@ const CATEGORY_LABEL: Record<string, string> = {
 
 const ACC = '#a9d94f'; // 档案绿（参考站点缀色）
 
-export function Hud({ hovered, selected, developed, filter, onSetFilter, onSelectEntry, onCloseSelect }: HudProps) {
+export function Hud({ hovered, selected, inspect, developed, filter, onSetFilter, onSelectEntry, onCloseSelect }: HudProps) {
   const [browserOpen, setBrowserOpen] = useState(false);
   const [densityV, setDensityV] = useState(45); // 0..100 连续密度
   const sliderRef = useRef<HTMLDivElement>(null);
@@ -49,7 +50,7 @@ export function Hud({ hovered, selected, developed, filter, onSetFilter, onSelec
   const cardW = 96 + densityV * 1.7; // 96 .. 266
   const cardH = Math.round(cardW * 0.72);
   const gridCols = Math.max(1, Math.min(6, Math.floor(552 / cardW)));
-  const detailMode = densityV >= 85;
+  const detailMode = densityV >= 85 || !!inspect;
   const detailIndex = Math.max(0, filtered.findIndex((e) => e.id === selected));
   const detailEntry = filtered[detailIndex] ?? filtered[0] ?? null;
 

@@ -35,7 +35,18 @@ export default function App() {
   const [minTimeUp, setMinTimeUp] = useState(false);
   const [entered, setEntered] = useState(false);
   const [filter, setFilter] = useState<ArchiveFilter>(null);
+  const [inspect, setInspect] = useState(false); // 胶片单击 → 放大检视（显影详情卡）
   const enteredRef = useRef(false);
+
+  // 胶片点选：非 null = 进入检视，null = 关闭
+  const handleSelect = useCallback((id: string | null) => {
+    setSelected(id);
+    setInspect(id !== null);
+  }, []);
+  const handleCloseSelect = useCallback(() => {
+    setSelected(null);
+    setInspect(false);
+  }, []);
 
   // 主页（封面）停留期间滚轮不驱动过片
   useEffect(() => {
@@ -78,7 +89,7 @@ export default function App() {
         shadows
         gl={{ antialias: true }}
         camera={{ fov: 42, near: 0.1, far: 220 }}
-        onPointerMissed={() => setSelected(null)}
+        onPointerMissed={handleCloseSelect}
       >
         <SceneSetup />
         {new URLSearchParams(location.search).get('v') === 'spiral' ? (
@@ -87,7 +98,7 @@ export default function App() {
             selected={selected}
             filter={filter}
             onHover={setHovered}
-            onSelect={setSelected}
+            onSelect={handleSelect}
             onCardReady={handleCardReady}
           />
         ) : (
@@ -96,7 +107,7 @@ export default function App() {
             selected={selected}
             filter={filter}
             onHover={setHovered}
-            onSelect={setSelected}
+            onSelect={handleSelect}
             onCardReady={handleCardReady}
           />
         )}
@@ -106,11 +117,12 @@ export default function App() {
         <Hud
           hovered={hovered}
           selected={selected}
+          inspect={inspect}
           developed={developed}
           filter={filter}
           onSetFilter={setFilter}
           onSelectEntry={setSelected}
-          onCloseSelect={() => setSelected(null)}
+          onCloseSelect={handleCloseSelect}
         />
       )}
 

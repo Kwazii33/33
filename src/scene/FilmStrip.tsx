@@ -354,6 +354,7 @@ totalEmissiveRadiance *= (0.85 + scanFall * 1.8);`);
       kk = k + 1;
     }
     posAttr.needsUpdate = true;
+    geo.computeBoundingSphere(); // 动态顶点：raycast 包围球必须每帧重算，否则点击命中失效
     geo.setDrawRange(0, kk * 6);
     // 边缘轮廓光顶点：左缘段 + 右缘段，各 kk 段；顶点色 = 观察灯局部点亮强度
     const eAttr = edgeGeo.getAttribute('position') as THREE.BufferAttribute;
@@ -438,7 +439,9 @@ totalEmissiveRadiance *= (0.85 + scanFall * 1.8);`);
     const i = frameAt(e.uv.x);
     if (i < 0 || dimmedArr[i]) return;
     e.stopPropagation();
-    if (selected === entries[i].id) onSelect(null);
+    // 双击画格 = 关闭检视（不判断选中状态——双击对的第一击已把条目设为选中，
+    // 此处若读组件闭包的 selected 可能滞后，导致判断失灵卡片关不掉）
+    onSelect(null);
   };
 
   return (
