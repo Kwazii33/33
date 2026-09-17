@@ -9,8 +9,9 @@ import * as THREE from 'three';
  *               前端追随光标轨迹，后端链式弹簧延迟跟随，形成柔软惯性曲线。
  *               同时把片头轨迹记录进 trail（供倒卷原路返回）。
  *  - locked：    定型。左键点击确认；片头冻结在当前位置，鼠标不再影响胶片。
- *  - rewinding： 倒卷。片头沿 trail 反向播放（先快后慢，保留惯性），
- *               胶片逐段滑回卷轴，归零后回到 idle。
+ *  - rewinding： 倒卷。整条胶片保持锁定形状，固定 2.2s ease-in-out 沿原路径
+ *               整体滑回卷轴（片尾沿 trail 反向后退、画格向卷轴流动由纹理偏移表达），
+ *               归零后回到 idle。
  *
  * 稳定性：每段独立阻尼弹簧 + 帧级快照前馈耦合 + 邻速阻尼，
  * 固定 1/240s 子步积分 + 失稳自动复位——任何帧率下不会发散。
@@ -26,11 +27,8 @@ const SUBSTEP = 1 / 240;
 const ANCHOR_SAMPLES = 3; // 出口锚定段数（固定在卷轴切向出口线上）
 const ANCHOR_BLEND_END = ANCHOR_SAMPLES + 6; // 冻结态「朝卷轴侧」约束的覆盖末端
 const TRAIL_MIN_DIST = 0.07; // 轨迹记录最小间距
-const REWIND_SPEED = 7; // 倒卷速度（恒定，单位/秒）——不加速不减速，丝滑匀速回收
-// —— 胶卷头动力学限制（鼠标只给方向意图，不是直接绘制胶片形状） ——
-const HEAD_VMAX = 14; // 胶卷头最大速度（单位/秒）——鼠标再快胶片头也只这么快
-const HEAD_OMEGA = 3.6; // 最大转向速率（弧度/秒）——禁止瞬间 90° 转折，90° 至少需 0.44s
-const HEAD_ACCEL = 45; // 加速度上限（平滑起步/缓冲停止）
+const REWIND_DURATION = 2.2; // 倒卷固定时长（秒）——ease-in-out 整体回缩，均匀无卡顿无逐帧跳动
+const CHASE_RATE = 14; // 胶卷头追随速率（1/s）——时间常数 ≈70ms，轻微惯性几乎无感，光标一动立即响应
 
 export type FilmMode = 'idle' | 'drawing' | 'locked' | 'rewinding';
 
@@ -90,7 +88,7 @@ export class FilmStripPath {
   private vsnap: THREE.Vector3[] = [];
   /** 实时位置（直接读取） */
   readonly pos: THREE.Vector3[] = [];
-  /** 胶卷头速度（转向速率/速度/加速度受限——惯性缓冲的核心状态） */
+  /** 胶卷头残余速度（锁定/倒卷时衰减，仅失稳探针记录用；跟随已由 CHASE 直接追踪替代） */
   private hv = new THREE.Vector3();
   /** 弹簧追随后的光标（带惯性） */
   private cur = new THREE.Vector3();
@@ -100,8 +98,10 @@ export class FilmStripPath {
   private lastK = 0;
   /** 片头轨迹（drawing 时记录，rewinding 时反向播放） */
   private trail: THREE.Vector3[] = [];
-  /** 倒卷播放游标（trail 反向走过的长度） */
+  /** 倒卷播放游标（trail 反向走过的长度，保留作 tip 目标的兜底路径） */
   private rewindWalked = 0;
+  /** 倒卷进度 0..1（固定时长 ease-in-out） */
+  private rewindT = 0;
   /** 倒卷起始时的整条冻结形状快照（刚性原路滑回用） */
   private revSnap: THREE.Vector3[] = [];
   /** 倒卷起始 out（滑回位移 = revFrom - out） */
@@ -247,6 +247,7 @@ export class FilmStripPath {
       filmControl.rewindRequested = false;
       filmControl.mode = 'rewinding';
       this.rewindWalked = 0;
+      this.rewindT = 0;
       // 快照锁定形状：倒卷 = 整条胶片沿自身原路径刚性滑回（逐样本精确反演，无弹簧跳变）
       const kSnap = Math.max(0, Math.min(this.sampleCount - 1, Math.floor(this.out / this.ds)));
       this.revSnap = [];
@@ -261,47 +262,27 @@ export class FilmStripPath {
     }
     const rewinding = filmControl.mode === 'rewinding';
 
-    // 胶卷头动力学（drawing）：鼠标只控制运动意图——
-    // 速度上限（VMAX）+ 转向速率上限（OMEGA）+ 加速度上限（ACCEL）。
-    // 鼠标猛甩/急转时胶片头以惯性缓冲走弧线跟随，禁止瞬间 90° 转折。
-    // locked/idle/rewinding 时不追随，速度衰减清零（重入 drawing 不跳变）。
+    // 胶卷头（drawing）：实时鼠标跟随——直接追踪光标，不预测、不规划整条曲线。
+    // 用户向哪移胶片头就向哪走（CHASE 轻微惯性 ≈ 70ms 滞后，几乎无感）；
+    // 后端链式弹簧的延迟跟随形成自然弯曲，曲率钳制只防折叠、不改方向。
+    // locked/idle/rewinding 时不追随（重入 drawing 不跳变）。
     if (mode === 'drawing') {
-      const dx = cursor.x - this.cur.x;
-      const dz = cursor.z - this.cur.z;
-      const dist = Math.hypot(dx, dz);
-      const wantV = Math.min(HEAD_VMAX, dist * 6);
-      const sp = Math.hypot(this.hv.x, this.hv.z);
-      if (sp < 1e-3) {
-        if (dist > 1e-4 && wantV > 0) {
-          const a0 = Math.atan2(dz, dx);
-          const v0 = Math.min(wantV, HEAD_ACCEL * dt);
-          this.hv.set(Math.cos(a0) * v0, 0, Math.sin(a0) * v0);
-        }
-      } else {
-        const curA = Math.atan2(this.hv.z, this.hv.x);
-        let dA = dist > 1e-4 ? Math.atan2(dz, dx) - curA : 0;
-        while (dA > Math.PI) dA -= Math.PI * 2;
-        while (dA < -Math.PI) dA += Math.PI * 2;
-        const maxTurn = HEAD_OMEGA * dt;
-        const turn = Math.max(-maxTurn, Math.min(maxTurn, dA));
-        let newSp = sp + Math.max(-HEAD_ACCEL * dt, Math.min(HEAD_ACCEL * dt, wantV - sp));
-        if (engage < 0.02) newSp = Math.max(0, sp - HEAD_ACCEL * dt * 1.5); // 鼠标停：逐渐减速
-        const newA = curA + turn;
-        this.hv.set(Math.cos(newA) * newSp, 0, Math.sin(newA) * newSp);
-      }
-      this.cur.x += this.hv.x * dt;
-      this.cur.z += this.hv.z * dt;
+      const k = Math.min(1, dt * CHASE_RATE);
+      this.cur.x += (cursor.x - this.cur.x) * k;
+      this.cur.z += (cursor.z - this.cur.z) * k;
     } else {
       this.hv.multiplyScalar(Math.max(0, 1 - dt * 10));
     }
 
     if (rewinding) {
-      // —— 倒卷：沿 trail 反向匀速播放（恒定速度，无加速无减速，无重新计算） ——
-      this.rewindWalked += REWIND_SPEED * dt;
-      const total = this.trailLength();
-      const remain = Math.max(0, total - this.rewindWalked);
-      this.out = Math.min(this.out, remain);
-      if (remain <= 0.001) {
+      // —— 倒卷：固定时长 ease-in-out 整体回缩（2.2s）——
+      // 整条胶片保持锁定形状，片尾沿原路径滑回卷轴；卷轴转速 = 片长变化/半径，
+      // 中途自然加速。无逐帧收回、无停顿、无跳变。
+      this.rewindT = Math.min(1, this.rewindT + dt / REWIND_DURATION);
+      const t = this.rewindT;
+      const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      this.out = this.revFrom * (1 - eased);
+      if (t >= 1) {
         // 收净：回到 idle
         this.out = 0;
         filmControl.mode = 'idle';
