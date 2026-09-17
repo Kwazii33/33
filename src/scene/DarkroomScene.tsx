@@ -9,10 +9,10 @@ import { archive } from '@/data/archive';
 import { matchesFilter, type ArchiveFilter } from '@/data/taxonomy';
 
 const ROLL_RADIUS = 0.85;
-/** 测试期画格数（?frames=N 可调，默认 5） */
+/** 档案画格数（?frames=N 可调，默认 40 全档案） */
 const FILM_N = Math.min(
   40,
-  Math.max(1, parseInt(new URLSearchParams(location.search).get('frames') || '5', 10) || 5),
+  Math.max(1, parseInt(new URLSearchParams(location.search).get('frames') || '40', 10) || 40),
 );
 
 interface DarkroomSceneProps {
