@@ -93,8 +93,6 @@ export class FilmStripPath {
   /** 弹簧追随后的光标（带惯性） */
   private cur = new THREE.Vector3();
   private out = 0;
-  private lastX = 0;
-  private lastZ = 0;
   private lastK = 0;
   /** 片头轨迹（drawing 时记录，rewinding 时反向播放） */
   private trail: THREE.Vector3[] = [];
@@ -177,8 +175,6 @@ export class FilmStripPath {
     this.tan0 = b.clone().sub(a).setY(0).normalize();
 
     // 初始：收纳（idle）
-    this.lastX = 0;
-    this.lastZ = 0;
     this.parkAll();
     this.cur.copy(this.base[0]);
   }
@@ -193,8 +189,6 @@ export class FilmStripPath {
         this.trail.length = 0;
         this.trail.push(this.base[0].clone().setY(0.05));
         this.cur.copy(this.base[0]);
-        this.lastX = this.cur.x;
-        this.lastZ = this.cur.z;
       }
       filmControl.mode = 'drawing';
       return true;
@@ -290,14 +284,18 @@ export class FilmStripPath {
         this.parkAll();
       }
     } else if (mode === 'drawing') {
-      // 拉出：按「胶片末端实际走过的路径」喂片（不是光标路径——光标会抄近道）
-      const travel = Math.hypot(this.cur.x - this.lastX, this.cur.z - this.lastZ);
-      if (engage > 0.02 && travel > 1e-4) {
-        this.out = Math.min(this.maxOut, this.out + travel);
+      // 喂片 = 卷轴到片头的直线距离（物理真实：胶片只按「够到片头所需」的长度吐出）。
+      // 旧的「路径积分喂片」在绕圈甩动时会把整卷胶片全部吐出（98u 片长挤进 18u 半径
+      // 桌面）→ 被可达域钳制成螺旋盘绕（用户视频里的崩坏）。
+      // 距离缩小时不回收：胶片保持铺展，余量由链式弹簧 + 软约束形成自然弯曲（像真实胶卷）。
+      // 吐片带一阶惯性（~12/s），卷轴旋转平滑不跳变。
+      if (engage > 0.02) {
+        const d = Math.hypot(this.cur.x - this.base[0].x, this.cur.z - this.base[0].z);
+        if (d > this.out) {
+          this.out = Math.min(this.maxOut, this.out + (d - this.out) * Math.min(1, dt * 12), d);
+        }
       }
     }
-    this.lastX = this.cur.x;
-    this.lastZ = this.cur.z;
     filmControl.outLength = this.out;
     filmControl.rewinding = rewinding;
     // 倒卷纹理偏移：画格向卷轴流动的滚动量（FilmStrip 写入贴图 offset）
