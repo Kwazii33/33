@@ -233,12 +233,12 @@ export class FilmStripPath {
 
   /**
    * 每帧仿真。
-   * @param t      时钟（秒）
+   * @param _t     时钟（秒，保留作未来时变驱动）
    * @param cursor 光标在工作台面上的世界坐标
    * @param engage 光标活跃度 0..1
    * @param dt     帧间隔（秒，调用方截断到 ≤0.05）
    */
-  update(t: number, cursor: THREE.Vector3, engage: number, dt: number) {
+  update(_t: number, cursor: THREE.Vector3, engage: number, dt: number) {
     const n = this.sampleCount;
     const mode = filmControl.mode;
 
@@ -306,7 +306,6 @@ export class FilmStripPath {
     // 活动 tip：浮点索引（tipFloat = out / ds）
     const tipFloat = this.out / this.ds;
     const k = Math.max(0, Math.min(n - 1, Math.floor(tipFloat)));
-    const frac = Math.max(0, Math.min(1, tipFloat - k));
 
     // 帧级快照（前馈耦合——稳定性关键）
     for (let i = 0; i < n; i++) {
@@ -434,15 +433,6 @@ export class FilmStripPath {
     }
   }
 
-  /** trail 折线总长 */
-  private trailLength(): number {
-    let L = 0;
-    for (let i = 1; i < this.trail.length; i++) {
-      L += this.trail[i].distanceTo(this.trail[i - 1]);
-    }
-    return L;
-  }
-
   /** trail 反向：从末端往回走 dist 处的插值点（写入 out） */
   private trailPointAt(dist: number, outV: THREE.Vector3): THREE.Vector3 {
     const m = this.trail.length;
@@ -560,7 +550,7 @@ export class FilmStripPath {
    * 软等长投影——每段向 ds 靠拢 35%，胶片不可无限拉伸。
    * 锚定侧与片头端不强制：两端形状由卷轴/胶卷头决定。
    */
-  private softConstraints(k: number, dt: number) {
+  private softConstraints(k: number, _dt: number) {
     const n = this.sampleCount;
     const end = Math.min(k, n - 1);
     if (end < ANCHOR_SAMPLES + 3) return;

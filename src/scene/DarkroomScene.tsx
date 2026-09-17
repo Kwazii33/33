@@ -82,7 +82,7 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
 
   useFrame(({ clock, camera, pointer }, delta) => {
     const dt = Math.min(delta, 0.05);
-    const w = window as unknown as { __sceneTick?: number; __pointer?: number[]; __film?: unknown; __reelPx?: number[] };
+    const w = window as unknown as { __sceneTick?: number; __pointer?: number[]; __film?: unknown; __reelPx?: number[]; __proj?: (x: number, y: number, z: number) => number[] };
     w.__sceneTick = (w.__sceneTick ?? 0) + 1;
     w.__pointer = [pointer.x, pointer.y];
     w.__film = { out: filmControl.outLength, engage: engage.current, mode: filmControl.mode };
