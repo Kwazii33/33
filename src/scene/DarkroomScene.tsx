@@ -139,6 +139,9 @@ export function DarkroomScene({ hovered, selected, filter, onHover, onSelect, on
       const prox = Math.max(0, Math.min(1, 1 - best / HOVER_R));
       const g = prox * prox * (3 - 2 * prox); // smoothstep 缓入缓出
       filmGlow.value += (g - filmGlow.value) * Math.min(1, dt * 5);
+      // 局部显影中心 = 光标台面容座（FilmStrip shader 高斯衰减用）
+      filmGlow.x = cursorWorld.current.x;
+      filmGlow.z = cursorWorld.current.z;
     }
   });
 

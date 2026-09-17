@@ -60,7 +60,8 @@ export function framesOut(out: number, cardCount: number): number {
  * FilmStrip 消费（emissiveIntensity 基值 + glow·增益）。统一逻辑覆盖胶卷头、
  * 胶片主体、所有画格。
  */
-export const filmGlow = { value: 0 };
+/** 统一 hover 显影状态：value = 邻近度 0..1（DarkroomScene 写），x/z = 光标世界坐标（局部显影中心） */
+export const filmGlow = { value: 0, x: 999, z: 999 };
 
 const _tgt = new THREE.Vector3();
 const _dir = new THREE.Vector3();

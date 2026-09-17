@@ -163,15 +163,19 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
         let dh = wy1 - wy0;
         if (ir > wr) dh = dw / ir;
         else dw = dh * ir;
-        // 底片透光感：亮度提升 + 轻对比 + 降饱和/琥珀化，像显影层而非普通照片
+        // 底片影像层：低对比灰度负片感 + 扩散光晕（影像像渗入乳剂层，而非贴于表面）
         const prevFilter = x.filter;
-        x.filter = 'brightness(2.1) contrast(1.12) saturate(0.78) sepia(0.14)';
         const ix = wx0 + (wx1 - wx0 - dw) / 2;
         const iy = wy0 + (wy1 - wy0 - dh) / 2;
+        x.globalAlpha = 0.26;
+        x.filter = 'blur(3px) brightness(1.6) saturate(0.5)';
+        x.drawImage(img, ix, iy, dw, dh);
+        x.globalAlpha = 1;
+        x.filter = 'brightness(1.9) contrast(0.98) saturate(0.55) sepia(0.18)';
         x.drawImage(img, ix, iy, dw, dh);
         x.filter = prevFilter;
-        // 显影层半透明覆盖：琥珀乳剂罩，增加底片质感
-        x.fillStyle = 'rgba(64,22,10,0.14)';
+        // 显影层半透明覆盖：极薄琥珀乳剂罩
+        x.fillStyle = 'rgba(64,22,10,0.10)';
         x.fillRect(ix, iy, dw, dh);
       }
       // 筛选淡化
@@ -231,11 +235,14 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
   }, [path]);
 
   // ———— 边缘轮廓光（hover 时沿胶片两侧边缘的微弱红线，additive 不照亮环境） ————
+  // 顶点色驱动：只有靠近光标的边缘段被点亮（局部观察灯），不整卷一起亮
+  const SCAN_R = 1.8; // 观察灯半径（世界单位，高斯衰减）
   const edgeGeo = useMemo(() => {
     const m = path.sampleCount;
     const g = new THREE.BufferGeometry();
     const pos = new Float32Array((m - 1) * 4 * 3);
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    g.setAttribute('color', new THREE.BufferAttribute(new Float32Array((m - 1) * 4 * 3), 3).setUsage(THREE.DynamicDrawUsage));
     g.setDrawRange(0, 0);
     return g;
   }, [path]);
@@ -245,15 +252,42 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
   const _lz = useMemo(() => new Float32Array(path.sampleCount), [path]);
   const _rx = useMemo(() => new Float32Array(path.sampleCount), [path]);
   const _rz = useMemo(() => new Float32Array(path.sampleCount), [path]);
+  // 观察灯局部显影：注入 physical shader——emissive 与 transmission 随光标距离高斯衰减
+  const onBeforeCompile = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => {
+    shader.uniforms.uScanPos = { value: new THREE.Vector2(999, 999) };
+    shader.uniforms.uScan = { value: 0 };
+    shader.uniforms.uScanR = { value: SCAN_R };
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+uniform vec2 uScanPos;
+uniform float uScan;
+uniform float uScanR;
+float scanFall = 0.0;`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+// 观察灯扫过底片：中心明显显影，向外快速衰减，无硬边
+float scanD = distance(vWorldPosition.xz, uScanPos);
+scanFall = uScan * exp(-scanD * scanD / (uScanR * uScanR));
+totalEmissiveRadiance *= (0.85 + scanFall * 1.8);`);
+    // transmission：改 chunk 首行赋值（chunk 内联后即采样，事后改无效）
+    const transChunk = THREE.ShaderChunk.transmission_fragment.replace(
+      'material.transmission = transmission;',
+      'material.transmission = transmission * (1.0 + scanFall * 2.2); // 观察灯下局部透光增强',
+    );
+    shader.fragmentShader = shader.fragmentShader.replace('#include <transmission_fragment>', transChunk);
+    if (matRef.current) matRef.current.userData.shader = shader;
+  }, []);
   const matRef = useRef<THREE.MeshPhysicalMaterial>(null);
   useFrame(() => {
-    // 统一 hover 微照亮：距离驱动的 emissive 渐变（近亮远暗，smooth）
+    // 观察灯 uniforms：光标世界坐标 + 邻近度（DarkroomScene 供给）
     if (matRef.current) {
-      matRef.current.emissiveIntensity = 0.55 + filmGlow.value * 0.5;
-    }
-    // 边缘轮廓光透明度随 hover 增强
-    if (edgeMatRef.current) {
-      edgeMatRef.current.opacity = filmGlow.value * 0.6;
+      matRef.current.emissiveIntensity = 0.55; // 基值恒定；显影增强由 shader 局部项承担
+      const sh = matRef.current.userData.shader as
+        | { uniforms: Record<string, { value: unknown }> }
+        | undefined;
+      if (sh) {
+        (sh.uniforms.uScanPos.value as THREE.Vector2).set(filmGlow.x, filmGlow.z);
+        sh.uniforms.uScan.value = filmGlow.value;
+      }
     }
     const posAttr = geo.getAttribute('position') as THREE.BufferAttribute;
     const k = Math.max(0, Math.min(path.sampleCount - 1, Math.floor(filmControl.outLength / path.ds)));
@@ -321,9 +355,15 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
     }
     posAttr.needsUpdate = true;
     geo.setDrawRange(0, kk * 6);
-    // 边缘轮廓光顶点：左缘段 + 右缘段，各 kk 段
+    // 边缘轮廓光顶点：左缘段 + 右缘段，各 kk 段；顶点色 = 观察灯局部点亮强度
     const eAttr = edgeGeo.getAttribute('position') as THREE.BufferAttribute;
+    const eCol = edgeGeo.getAttribute('color') as THREE.BufferAttribute;
     const ey = path.pos[0].y - 0.006;
+    const invR2 = 1 / (SCAN_R * SCAN_R);
+    const scanAt = (px: number, pz: number): number => {
+      const d2 = (px - filmGlow.x) * (px - filmGlow.x) + (pz - filmGlow.z) * (pz - filmGlow.z);
+      return filmGlow.value * Math.exp(-d2 * invR2);
+    };
     for (let i = 0; i < kk; i++) {
       const j = Math.min(kk, i + 1);
       eAttr.setXYZ(i * 2, _lx[i], ey, _lz[i]);
@@ -331,8 +371,18 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
       const o = (m - 1) * 2;
       eAttr.setXYZ(o + i * 2, _rx[i], ey, _rz[i]);
       eAttr.setXYZ(o + i * 2 + 1, _rx[j], ey, _rz[j]);
+      // 顶点色：靠近光标 → 红，远离 → 黑（additive 下自然消隐）
+      const cl0 = scanAt(_lx[i], _lz[i]);
+      const cl1 = scanAt(_lx[j], _lz[j]);
+      const cr0 = scanAt(_rx[i], _rz[i]);
+      const cr1 = scanAt(_rx[j], _rz[j]);
+      eCol.setXYZ(i * 2, cl0, cl0 * 0.31, cl0 * 0.19);
+      eCol.setXYZ(i * 2 + 1, cl1, cl1 * 0.31, cl1 * 0.19);
+      eCol.setXYZ(o + i * 2, cr0, cr0 * 0.31, cr0 * 0.19);
+      eCol.setXYZ(o + i * 2 + 1, cr1, cr1 * 0.31, cr1 * 0.19);
     }
     eAttr.needsUpdate = true;
+    eCol.needsUpdate = true;
     edgeGeo.setDrawRange(0, kk * 4);
   });
 
@@ -418,14 +468,16 @@ export function FilmStrip({ path, entries, totalCount, dimmed, selected, onHover
         bumpMap={bumpTex}
         bumpScale={0.02}
         side={THREE.DoubleSide}
+        onBeforeCompile={onBeforeCompile}
       />
     </mesh>
     <lineSegments geometry={edgeGeo} frustumCulled={false}>
       <lineBasicMaterial
         ref={edgeMatRef}
-        color="#ff5030"
+        color="#ffffff"
+        vertexColors
         transparent
-        opacity={0}
+        opacity={0.85}
         blending={THREE.AdditiveBlending}
         depthWrite={false}
       />
